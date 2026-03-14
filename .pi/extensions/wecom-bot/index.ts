@@ -68,6 +68,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   // 当前正在处理的 chatid
   let currentChatId: string | null = null;
 
+  // 标记是否已发送响应
+  let responseSent = false;
+
   // AI 响应累积
   let aiResponseBuffer = "";
 
@@ -176,6 +179,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     // 设置当前处理的 chatid
     currentChatId = chatId;
 
+    // 重置响应发送标志
+    responseSent = false;
+
     // 清空响应缓冲
     aiResponseBuffer = '';
 
@@ -276,7 +282,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   pi.on('message_end', async (event, ctx) => {
     const message = event.message;
     
-    console.log(`[WeCom Debug] message_end: role = ${message?.role}, currentChatId = ${currentChatId}`);
+    console.log(`[WeCom Debug] message_end: role = ${message?.role}, currentChatId = ${currentChatId}, responseSent = ${responseSent}`);
     
     // 只处理 assistant 消息
     if (!message || message.role !== 'assistant') {
@@ -287,6 +293,12 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     // 检查是否有待处理的 WeCom 请求
     if (!currentChatId) {
       console.log(`[WeCom Debug] message_end: 跳过，没有 currentChatId`);
+      return;
+    }
+
+    // 如果已经发送过响应，跳过
+    if (responseSent) {
+      console.log(`[WeCom Debug] message_end: 跳过，响应已发送`);
       return;
     }
 
@@ -318,6 +330,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     // 如果有文本内容，发送响应
     if (content) {
       console.log(`[WeCom Debug] message_end: 发送响应，内容: ${content.substring(0, 100)}...`);
+      responseSent = true;
       await sendResponseToWeCom(currentChatId, content, true);
       // 清理状态
       currentChatId = null;
@@ -333,11 +346,17 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
   // 监听 turn_end 事件 - 作为备份，确保响应被发送
   pi.on('turn_end', async (event, ctx) => {
-    console.log(`[WeCom Debug] turn_end: turnIndex = ${event.turnIndex}, currentChatId = ${currentChatId}`);
+    console.log(`[WeCom Debug] turn_end: turnIndex = ${event.turnIndex}, currentChatId = ${currentChatId}, responseSent = ${responseSent}`);
     
     // 检查是否有待处理的 WeCom 请求
     if (!currentChatId) {
       console.log(`[WeCom Debug] turn_end: 没有待处理的请求`);
+      return;
+    }
+
+    // 如果已经发送过响应，跳过
+    if (responseSent) {
+      console.log(`[WeCom Debug] turn_end: 跳过，响应已发送`);
       return;
     }
 
@@ -362,19 +381,26 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
 
     const textContents = message.content?.filter((c): c is { type: 'text'; text: string } => c.type === 'text') || [];
+    const toolUses = message.content?.filter(c => c.type === 'toolUse') || [];
     const content = textContents.map(c => c.text).join('\n');
 
-    console.log(`[WeCom Debug] turn_end: 文本内容长度 = ${content.length}`);
+    console.log(`[WeCom Debug] turn_end: 文本内容长度 = ${content.length}, 工具调用数量 = ${toolUses.length}`);
+
+    // 如果有工具调用，不清理状态，等待后续处理
+    if (toolUses.length > 0) {
+      console.log(`[WeCom Debug] turn_end: 检测到工具调用，保持状态等待后续处理`);
+      return;
+    }
 
     if (content) {
       console.log(`[WeCom Debug] turn_end: 发送响应`);
+      responseSent = true;
       await sendResponseToWeCom(currentChatId, content, true);
+      // 只有在发送响应后才清理状态
+      currentChatId = null;
     } else {
-      console.log(`[WeCom Debug] turn_end: 没有文本内容`);
+      console.log(`[WeCom Debug] turn_end: 没有文本内容，保持状态等待 message_end`);
     }
-
-    // 清理状态
-    currentChatId = null;
   });
 
   // 注册 /wecom 命令
