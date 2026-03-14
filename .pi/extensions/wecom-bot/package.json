@@ -1,0 +1,9 @@
+{
+  "name": "wecom-bot-extension",
+  "version": "1.0.0",
+  "description": "企业微信机器人 pi 扩展",
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.0",
+    "dotenv": "^17.3.1"
+  }
+}

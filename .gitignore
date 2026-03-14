@@ -2,3 +2,4 @@ node_modules/
 dist/
 .env
 *.log
+.pi/extensions/wecom-bot/.env
