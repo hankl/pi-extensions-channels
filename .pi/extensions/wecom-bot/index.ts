@@ -254,22 +254,74 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
   }
 
-  // 监听 turn_end 事件 - 在整个 turn（包括工具调用和最终回复）完成后触发
-  pi.on('turn_end', async (event, ctx) => {
+  // 监听 message_end 事件 - 在 assistant 消息完成时触发
+  pi.on('message_end', async (event, ctx) => {
+    const message = event.message;
+    
+    // 只处理 assistant 消息
+    if (!message || message.role !== 'assistant') return;
+    
     // 检查是否有待处理的 WeCom 请求
     if (!currentChatId) return;
 
     const pending = pendingRequests.get(currentChatId);
     if (!pending) return;
 
+    // 提取文本内容
+    const content = message.content
+      .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
+
+    console.log(`[WeCom] 📝 message_end 收到内容: ${content?.substring(0, 100)}...`);
+
+    // 检查是否有工具调用 - 如果有工具调用，说明 AI 还在处理中，不发送响应
+    const hasToolUse = message.content.some(c => c.type === 'toolUse');
+    if (hasToolUse) {
+      console.log(`[WeCom] 🔧 检测到工具调用，等待后续处理...`);
+      return;
+    }
+
+    // 如果有文本内容，发送响应
+    if (content) {
+      console.log(`[WeCom] ✅ 发送最终响应`);
+      await sendResponseToWeCom(currentChatId, content, true);
+      // 清理状态
+      currentChatId = null;
+    }
+  });
+
+  // 监听 turn_end 事件 - 作为备份，确保响应被发送
+  pi.on('turn_end', async (event, ctx) => {
+    // 检查是否有待处理的 WeCom 请求
+    if (!currentChatId) {
+      console.log(`[WeCom] turn_end: 没有待处理的请求`);
+      return;
+    }
+
+    const pending = pendingRequests.get(currentChatId);
+    if (!pending) {
+      console.log(`[WeCom] turn_end: 未找到 pending request`);
+      return;
+    }
+
     // 从 turn_end 的 message 中提取文本内容
     const message = event.message;
-    if (!message || message.role !== 'assistant') return;
+    if (!message) {
+      console.log(`[WeCom] turn_end: 没有 message`);
+      return;
+    }
+
+    console.log(`[WeCom] turn_end: message role = ${message.role}`);
+
+    if (message.role !== 'assistant') return;
 
     const content = message.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map(c => c.text)
       .join('\n');
+
+    console.log(`[WeCom] turn_end: content = ${content?.substring(0, 100)}...`);
 
     if (content) {
       // 发送最终响应
