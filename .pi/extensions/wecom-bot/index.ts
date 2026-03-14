@@ -254,19 +254,19 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
   }
 
-  // 监听 AI 消息事件
-  pi.on('message_end', async (event, ctx) => {
-    // 只处理 assistant 消息
-    if (event.message.role !== 'assistant') return;
-
+  // 监听 turn_end 事件 - 在整个 turn（包括工具调用和最终回复）完成后触发
+  pi.on('turn_end', async (event, ctx) => {
     // 检查是否有待处理的 WeCom 请求
     if (!currentChatId) return;
 
     const pending = pendingRequests.get(currentChatId);
     if (!pending) return;
 
-    // 提取文本内容
-    const content = event.message.content
+    // 从 turn_end 的 message 中提取文本内容
+    const message = event.message;
+    if (!message || message.role !== 'assistant') return;
+
+    const content = message.content
       .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
       .map(c => c.text)
       .join('\n');
@@ -278,17 +278,6 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
     // 清理状态
     currentChatId = null;
-  });
-
-  // 监听消息更新（流式响应）
-  pi.on('message_update', async (event, ctx) => {
-    if (!currentChatId) return;
-
-    const pending = pendingRequests.get(currentChatId);
-    if (!pending) return;
-
-    // 可以在这里实现流式更新到 WeCom
-    // 注意：频繁更新可能会触发限制，建议在 message_end 时一次性发送
   });
 
   // 注册 /wecom 命令
