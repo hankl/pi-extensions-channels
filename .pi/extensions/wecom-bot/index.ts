@@ -45,6 +45,13 @@ interface PendingRequest {
   startTime: number;
 }
 
+// 最近联系的用户
+interface LastContact {
+  userId: string;
+  chatId: string;
+  chatType: 'single' | 'group';
+}
+
 export default function wecomBotExtension(pi: ExtensionAPI) {
   // WeCom 客户端
   let client: WSClient | null = null;
@@ -63,6 +70,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
   // AI 响应累积
   let aiResponseBuffer = "";
+
+  // 最近联系的用户
+  let lastContact: LastContact | null = null;
 
   // 从 settings 获取配置
   function getConfig(): { botId: string; secret: string } | null {
@@ -159,6 +169,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       accumulatedContent: '',
       startTime: Date.now(),
     });
+
+    // 记录最近联系的用户
+    lastContact = { userId, chatId, chatType };
 
     // 设置当前处理的 chatid
     currentChatId = chatId;
@@ -320,6 +333,33 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
             ctx.ui.notify('已断开连接', 'info');
           } else {
             ctx.ui.notify('未连接', 'warning');
+          }
+          break;
+
+        case 'send':
+          if (!client || !state.connected) {
+            ctx.ui.notify('未连接', 'error');
+            return;
+          }
+          if (!lastContact) {
+            ctx.ui.notify('没有最近联系的用户', 'warning');
+            return;
+          }
+          const msg = args.replace(/^send\s+/i, '').trim();
+          if (!msg) {
+            ctx.ui.notify('用法: /wecom send <消息内容>', 'info');
+            return;
+          }
+          try {
+            await client.sendMessage(lastContact.chatId, {
+              msgtype: 'markdown',
+              markdown: { content: msg },
+            });
+            ctx.ui.notify(`已发送给 ${lastContact.userId}`, 'success');
+            console.log(`[WeCom] 📤 已发送消息给 ${lastContact.userId}: ${msg}`);
+          } catch (err) {
+            ctx.ui.notify('发送失败', 'error');
+            console.error('[WeCom] 发送失败:', err);
           }
           break;
 
