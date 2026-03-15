@@ -17,23 +17,14 @@
 
 ## 配置
 
-在 `~/.pi/settings.json` 中添加环境变量，或直接设置系统环境变量：
-
-```json
-{
-  "env": {
-    "WECOM_BOT_ID": "your-bot-id",
-    "WECOM_BOT_SECRET": "your-bot-secret"
-  }
-}
-```
-
-或设置环境变量：
+在扩展目录下的 `.env` 文件中配置机器人凭证：
 
 ```bash
-export WECOM_BOT_ID=your-bot-id
-export WECOM_BOT_SECRET=your-bot-secret
+WECOM_BOT_ID=your-bot-id
+WECOM_BOT_SECRET=your-bot-secret
 ```
+
+扩展会自动加载 `.pi/extensions/wecom-bot/.env` 文件。
 
 ## 使用
 

@@ -7,7 +7,7 @@
  * - 将 AI 响应回复给企业微信用户
  *
  * 使用：
- * 1. 在 settings.json 中配置 WECOM_BOT_ID 和 WECOM_BOT_SECRET
+ * 1. 在扩展目录下的 .env 文件中配置 WECOM_BOT_ID 和 WECOM_BOT_SECRET
  * 2. 扩展会自动连接企业微信机器人
  * 3. 用户发送消息到机器人，AI 会自动响应
  *
@@ -79,12 +79,8 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
   // 从 settings 获取配置
   function getConfig(): { botId: string; secret: string } | null {
-    // 尝试从环境变量获取
     const botId = process.env.WECOM_BOT_ID;
     const secret = process.env.WECOM_BOT_SECRET;
-    
-    console.log('[WeCom Debug] WECOM_BOT_ID:', botId ? '已设置' : '未设置');
-    console.log('[WeCom Debug] WECOM_BOT_SECRET:', secret ? '已设置' : '未设置');
 
     if (botId && secret) {
       return { botId, secret };
@@ -154,6 +150,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
   // 处理 WeCom 消息
   async function handleWeComMessage(frame: WsFrame): Promise<void> {
+    console.log('[WeCom Debug] handleWeComMessage 被调用');
+    console.log('[WeCom Debug] frame.body:', JSON.stringify(frame.body, null, 2));
+    
     const body = frame.body;
     const content = body.text?.content || '';
     const chatId = body.chatid || body.from?.userid || '';
@@ -161,6 +160,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     const chatType = body.chattype || 'single';
 
     console.log(`[WeCom] 💬 收到消息 [${chatType}] ${userId}: ${content}`);
+    console.log(`[WeCom Debug] chatId = ${chatId}, userId = ${userId}`);
 
     // 生成流式消息 ID
     const streamId = generateReqId('stream');
@@ -201,7 +201,9 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
 
     // 发送给 AI 处理
+    console.log('[WeCom Debug] 调用 pi.sendUserMessage...');
     pi.sendUserMessage(userMessage);
+    console.log('[WeCom Debug] pi.sendUserMessage 已返回');
   }
 
   // 处理进入会话事件
@@ -239,13 +241,16 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
   // 发送 AI 响应到 WeCom
   async function sendResponseToWeCom(chatId: string, content: string, isFinal: boolean = true): Promise<void> {
+    console.log(`[WeCom Debug] sendResponseToWeCom: chatId = ${chatId}, content length = ${content.length}, isFinal = ${isFinal}`);
     const pending = pendingRequests.get(chatId);
     if (!pending || !client) {
-      console.log(`[WeCom] 未找到待处理请求: ${chatId}`);
+      console.log(`[WeCom Debug] sendResponseToWeCom: 未找到待处理请求或客户端为空`);
+      console.log(`[WeCom Debug] pending = ${pending ? 'exists' : 'null'}, client = ${client ? 'exists' : 'null'}`);
       return;
     }
 
     const { frame, streamId } = pending;
+    console.log(`[WeCom Debug] sendResponseToWeCom: 准备发送响应，streamId = ${streamId}`);
 
     try {
       // 发送流式回复
@@ -254,6 +259,8 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       if (isFinal) {
         pendingRequests.delete(chatId);
         console.log(`[WeCom] ✅ 响应已发送`);
+      } else {
+        console.log(`[WeCom Debug] 流式响应片段已发送`);
       }
     } catch (err) {
       console.error('[WeCom] 发送响应失败:', err);
@@ -283,6 +290,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     const message = event.message;
     
     console.log(`[WeCom Debug] message_end: role = ${message?.role}, currentChatId = ${currentChatId}, responseSent = ${responseSent}`);
+    console.log(`[WeCom Debug] message_end: pendingRequests keys = [${Array.from(pendingRequests.keys()).join(', ')}]`);
     
     // 只处理 assistant 消息
     if (!message || message.role !== 'assistant') {
