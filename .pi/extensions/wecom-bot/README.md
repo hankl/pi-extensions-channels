@@ -81,3 +81,8 @@ AI: 当然！我来帮你写一个 Python 脚本...
 ```
 
 修改 `index.ts` 后，使用 `/reload` 重新加载扩展。
+
+## 相关文档
+
+- [pi 扩展文档](/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/docs/extensions.md)
+- [企业微信智能机器人 SDK](https://www.npmjs.com/package/@wecom/aibot-node-sdk)

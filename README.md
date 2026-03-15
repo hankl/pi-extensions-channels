@@ -1,52 +1,48 @@
-# 企业微信机器人 pi 扩展
+# pi 扩展平台
+
+为 pi 接入第三方客户端的扩展集合。目前支持企业微信机器人，未来计划支持飞书、钉钉等更多客户端。
+
+## 客户端支持
+
+| 客户端 | 状态 | 说明 |
+|--------|------|------|
+| 企业微信 | ✅ 已支持 | WebSocket 长连接，消息自动转发 AI |
+| 飞书 | 🔜 计划中 | - |
+| 钉钉 | 🔜 计划中 | - |
+
+## 已支持的扩展
+
+### wecom-bot - 企业微信机器人
 
 将企业微信智能机器人集成到 pi 中，通过 WebSocket 长连接接收用户消息，并使用 pi 接入的 AI 模型进行响应。
 
-## 功能特性
+**功能特性：**
 
-- 🔗 **WebSocket 长连接** - 自动连接、认证、心跳保活
-- 📨 **消息转发** - 将企业微信消息转发给 AI 模型
-- 💬 **自动回复** - AI 响应自动回复给用户
-- 🔄 **流式状态** - 显示"思考中"状态
-- 👋 **欢迎语** - 用户进入会话自动发送欢迎语
-- 🃏 **模板卡片** - 支持模板卡片交互
-- 🔁 **自动重连** - 断线后自动重连
+- 🔗 WebSocket 长连接 - 自动连接、认证、心跳保活
+- 📨 消息转发 - 将企业微信消息转发给 AI 模型
+- 💬 自动回复 - AI 响应自动回复给用户
+- 🔄 流式状态 - 显示"思考中"状态
+- 👋 欢迎语 - 用户进入会话自动发送欢迎语
+- 🃏 模板卡片 - 支持模板卡片交互
+- 🔁 自动重连 - 断线后自动重连
 
-## 安装
-
-扩展已位于 `.pi/extensions/wecom-bot/` 目录，pi 会自动加载。
-
-## 配置
-
-在 `~/.pi/settings.json` 中配置环境变量：
-
-```json
-{
-  "env": {
-    "WECOM_BOT_ID": "your-bot-id",
-    "WECOM_BOT_SECRET": "your-bot-secret"
-  }
-}
-```
-
-或设置系统环境变量：
+**安装：**
 
 ```bash
-export WECOM_BOT_ID=your-bot-id
-export WECOM_BOT_SECRET=your-bot-secret
+cd .pi/extensions/wecom-bot
+npm install
 ```
 
-## 使用
+**配置：**
 
-### 启动 pi
+在扩展目录下的 `.env` 文件中配置：
 
 ```bash
-pi
+WECOM_BOT_ID=your-bot-id
+WECOM_BOT_SECRET=your-bot-secret
 ```
 
-扩展会自动连接企业微信机器人。
-
-### 命令
+**使用：**
 
 ```
 /wecom status     # 查看连接状态
@@ -54,57 +50,26 @@ pi
 /wecom disconnect # 断开连接
 ```
 
-### 工作流程
-
-```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   企业微信用户    │────▶│   WeCom Bot     │────▶│   pi + AI      │
-│                 │     │   (WebSocket)   │     │                 │
-│                 │◀────│                 │◀────│                 │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
-```
-
-1. 用户在企业微信发送消息
-2. 消息通过 WebSocket 推送到扩展
-3. 扩展调用 `pi.sendUserMessage()` 发送给 AI
-4. AI 响应通过 `message_end` 事件捕获
-5. 响应通过 WebSocket 回复给用户
-
-## 目录结构
-
-```
-.pi/extensions/wecom-bot/
-├── package.json    # npm 依赖配置
-├── index.ts        # 扩展主代码
-└── README.md       # 说明文档
-```
+**详细文档：** [.pi/extensions/wecom-bot/README.md](.pi/extensions/wecom-bot/README.md)
 
 ## 扩展开发
 
-修改 `index.ts` 后，使用 `/reload` 重新加载扩展。
+### 添加新客户端
 
-### 关键代码
+1. 在 `.pi/extensions/` 下创建新扩展目录
+2. 实现扩展入口文件 `index.ts`
+3. 参考 wecom-bot 的实现方式
 
-```typescript
-// 监听 WeCom 消息
-wsClient.on('message.text', async (frame: WsFrame) => {
-  const content = frame.body.text?.content;
-  // 发送给 AI
-  pi.sendUserMessage(content);
-});
+### 目录结构
 
-// 监听 AI 响应
-pi.on('message_end', async (event, ctx) => {
-  if (event.message.role !== 'assistant') return;
-  // 发送给 WeCom
-  await client.replyStream(frame, streamId, content, true);
-});
 ```
-
-## 相关文档
-
-- [pi 扩展文档](/opt/homebrew/lib/node_modules/@mariozechner/pi-coding-agent/docs/extensions.md)
-- [企业微信智能机器人 SDK](https://www.npmjs.com/package/@wecom/aibot-node-sdk)
+.pi/extensions/
+├── wecom-bot/           # 企业微信机器人
+│   ├── index.ts         # 扩展代码
+│   ├── package.json     # 依赖配置
+│   └── README.md        # 使用文档
+└── [新扩展]/            # 未来扩展
+```
 
 ## 许可证
 
