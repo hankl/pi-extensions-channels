@@ -421,7 +421,8 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   pi.registerCommand('wecom', {
     description: '企业微信机器人管理',
     handler: async (args, ctx) => {
-      const subCommand = args.trim().toLowerCase();
+      const trimmedArgs = args.trim();
+      const subCommand = trimmedArgs.split(/\s+/)[0].toLowerCase();
 
       switch (subCommand) {
         case 'status':
