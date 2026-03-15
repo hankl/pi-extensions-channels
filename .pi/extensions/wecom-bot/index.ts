@@ -18,10 +18,16 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { WSClient, WsFrame, generateReqId } from "@wecom/aibot-node-sdk";
+import pkg from "@wecom/aibot-node-sdk";
 import { config } from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, resolve } from 'path';
+
+const { WSClient, WsFrame, generateReqId } = pkg;
+
+// 我的名字
+const MY_NAME = "Daniel";
+console.log(`🤖 我的名字是: ${MY_NAME}`);
 
 // 获取当前文件所在目录
 const __filename = fileURLToPath(import.meta.url);
@@ -214,7 +220,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     try {
       await client?.replyWelcome(frame, {
         msgtype: 'text',
-        text: { content: '👋 您好！我是 AI 助手，有什么可以帮您的吗？' },
+        text: { content: `👋 您好！我是 ${MY_NAME} ，有什么可以帮您的吗？` },
       });
     } catch (err) {
       console.error('[WeCom] 发送欢迎语失败:', err);
