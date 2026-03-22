@@ -3,3 +3,6 @@ dist/
 .env
 *.log
 .pi/extensions/wecom-bot/.env
+
+.pi/task-runner/state.json
+.pi/task-runner/config.json
