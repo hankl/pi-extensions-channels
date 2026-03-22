@@ -36,11 +36,41 @@ WECOM_BOT_SECRET=your-bot-secret
 
 在 pi 中使用 `/wecom` 命令管理机器人：
 
-```
-/wecom status     # 查看连接状态
-/wecom connect    # 手动连接
-/wecom disconnect # 断开连接
-```
+| 命令 | 说明 |
+|------|------|
+| `/wecom status` | 查看连接状态 |
+| `/wecom connect` | 手动连接企微机器人 |
+| `/wecom disconnect` | 断开连接 |
+| `/wecom send <消息>` | 发送消息给最近联系人 |
+
+#### 命令详情
+
+**`/wecom status`**
+显示当前连接状态和认证情况。
+
+**`/wecom connect`**
+手动发起连接。如果已配置环境变量，pi 启动时会自动连接，无需手动执行。
+
+**`/wecom disconnect`**
+断开与企业微信机器人的连接。
+
+**`/wecom send <消息>`**
+主动发送消息给最近联系的用户。
+
+- **前提条件**：
+  1. 机器人已连接（`/wecom status` 显示已连接）
+  2. 有最近联系人（需要先收到过该用户的消息）
+
+- **使用示例**：
+  ```
+  /wecom send 你好，有什么可以帮你的？
+  /wecom send 今天的报告已生成，请查收。
+  ```
+
+- **注意事项**：
+  - 消息格式为 Markdown
+  - 发送目标是最近一次交互的用户
+  - 如果没有最近联系人，会提示"没有最近联系的用户"
 
 ### 工作流程
 
