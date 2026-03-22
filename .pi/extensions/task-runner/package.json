@@ -1,0 +1,5 @@
+{
+  "name": "task-runner-extension",
+  "version": "1.0.0",
+  "description": "Pi extension for polling TaskBus and executing claimed tasks"
+}

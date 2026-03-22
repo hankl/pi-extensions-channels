@@ -1,520 +1,418 @@
-/**
- * 企业微信机器人 pi 扩展
- *
- * 功能：
- * - 通过 WebSocket 长连接接收企业微信消息
- * - 将用户消息转发给 pi 接入的 AI 模型
- * - 将 AI 响应回复给企业微信用户
- *
- * 使用：
- * 1. 在扩展目录下的 .env 文件中配置 WECOM_BOT_ID 和 WECOM_BOT_SECRET
- * 2. 扩展会自动连接企业微信机器人
- * 3. 用户发送消息到机器人，AI 会自动响应
- *
- * 命令：
- * - /wecom status  - 查看连接状态
- * - /wecom connect - 手动连接
- * - /wecom disconnect - 断开连接
- */
-
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import pkg from "@wecom/aibot-node-sdk";
-import { config } from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, resolve } from 'path';
+import { config } from "dotenv";
+import { fileURLToPath } from "url";
+import { dirname, resolve } from "path";
 
-const { WSClient, WsFrame, generateReqId } = pkg;
-
-// 我的名字
-const MY_NAME = "Daniel";
-console.log(`🤖 我的名字是: ${MY_NAME}`);
-
-// 获取当前文件所在目录
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// 加载扩展目录下的 .env 文件
-config({ path: resolve(__dirname, '.env') });
+config({ path: resolve(__dirname, ".env") });
 
-// 扩展状态
+const { WSClient, generateReqId } = pkg as {
+  WSClient: new (options: {
+    botId: string;
+    secret: string;
+    maxReconnectAttempts: number;
+  }) => any;
+  generateReqId: (prefix: string) => string;
+};
+
+type WsFrame = any;
+
+const AGENT_NAME = "Daniel";
+const CUTE_THINKING_STATES = [
+  "🐣 正在想呢...",
+  "🐰 我来看看...",
+  "🫧 正在整理思路...",
+  "🐼 正在认真思考...",
+  "✨ 马上就好...",
+];
+
 interface WeComState {
   connected: boolean;
   authenticated: boolean;
   botId?: string;
 }
 
-// 待处理的 WeCom 请求
 interface PendingRequest {
   frame: WsFrame;
   streamId: string;
-  accumulatedContent: string;
-  startTime: number;
 }
 
-// 最近联系的用户
 interface LastContact {
   userId: string;
   chatId: string;
-  chatType: 'single' | 'group';
+  chatType: "single" | "group";
+}
+
+interface NotifyPayload {
+  message: string;
+  chatId?: string;
+  label?: string;
+}
+
+function isNotifyPayload(value: unknown): value is NotifyPayload {
+  return !!value && typeof value === "object" && typeof (value as NotifyPayload).message === "string";
+}
+
+function getCuteThinkingStatus(): string {
+  const index = Math.floor(Math.random() * CUTE_THINKING_STATES.length);
+  return CUTE_THINKING_STATES[index];
 }
 
 export default function wecomBotExtension(pi: ExtensionAPI) {
-  // WeCom 客户端
-  let client: WSClient | null = null;
-  
-  // 状态
+  let client: any = null;
+  let lastContact: LastContact | null = null;
+  let currentChatId: string | null = null;
+  let responseSent = false;
+  const pendingRequests = new Map<string, PendingRequest>();
+  const cleanups: Array<() => void> = [];
+
   const state: WeComState = {
     connected: false,
     authenticated: false,
   };
 
-  // 待处理的请求映射 (chatid -> PendingRequest)
-  const pendingRequests = new Map<string, PendingRequest>();
-
-  // 当前正在处理的 chatid
-  let currentChatId: string | null = null;
-
-  // 标记是否已发送响应
-  let responseSent = false;
-
-  // AI 响应累积
-  let aiResponseBuffer = "";
-
-  // 最近联系的用户
-  let lastContact: LastContact | null = null;
-
-  // 从 settings 获取配置
   function getConfig(): { botId: string; secret: string } | null {
     const botId = process.env.WECOM_BOT_ID;
     const secret = process.env.WECOM_BOT_SECRET;
 
-    if (botId && secret) {
-      return { botId, secret };
+    if (!botId || !secret) {
+      return null;
     }
 
-    return null;
+    return { botId, secret };
   }
 
-  // 初始化 WeCom 客户端
-  function initClient(botId: string, secret: string): WSClient {
+  function getNotifyTarget(): { chatId?: string; label: string } {
+    const chatId = process.env.WECOM_NOTIFY_CHAT_ID?.trim();
+    const label = process.env.WECOM_NOTIFY_LABEL?.trim() || "notify-target";
+    return { chatId, label };
+  }
+
+  function resolveChatTarget(explicitChatId?: string): { chatId?: string; label: string } {
+    if (explicitChatId) {
+      return { chatId: explicitChatId, label: explicitChatId };
+    }
+
+    const notifyTarget = getNotifyTarget();
+    if (notifyTarget.chatId) {
+      return notifyTarget;
+    }
+
+    if (lastContact) {
+      return { chatId: lastContact.chatId, label: lastContact.userId };
+    }
+
+    return { chatId: undefined, label: "unresolved" };
+  }
+
+  async function sendMarkdown(message: string, explicitChatId?: string): Promise<{ ok: boolean; reason?: string }> {
+    if (!client || !state.connected) {
+      return { ok: false, reason: "wecom client is not connected" };
+    }
+
+    const target = resolveChatTarget(explicitChatId);
+    if (!target.chatId) {
+      return { ok: false, reason: "no notify chat configured and no recent contact available" };
+    }
+
+    await client.sendMessage(target.chatId, {
+      msgtype: "markdown",
+      markdown: { content: message },
+    });
+
+    console.log(`[WeCom] sent proactive message to ${target.label}`);
+    return { ok: true };
+  }
+
+  async function handleNotifyEvent(payload: unknown): Promise<void> {
+    if (!isNotifyPayload(payload)) {
+      return;
+    }
+
+    try {
+      const result = await sendMarkdown(payload.message, payload.chatId);
+      if (!result.ok) {
+        console.warn(`[WeCom] proactive notify skipped: ${result.reason}`);
+      }
+    } catch (error) {
+      console.error("[WeCom] proactive notify failed:", error);
+    }
+  }
+
+  function initClient(botId: string, secret: string): any {
     const wsClient = new WSClient({
       botId,
       secret,
-      maxReconnectAttempts: -1, // 无限重连
+      maxReconnectAttempts: -1,
     });
 
-    // 连接事件
-    wsClient.on('connected', () => {
+    wsClient.on("connected", () => {
       state.connected = true;
-      pi.events.emit('wecom:status', { connected: true });
-      console.log('[WeCom] 🔗 WebSocket 连接已建立');
+      pi.events.emit("wecom:status", { connected: true });
+      console.log("[WeCom] websocket connected");
     });
 
-    // 认证成功
-    wsClient.on('authenticated', () => {
+    wsClient.on("authenticated", () => {
       state.authenticated = true;
       state.botId = botId;
-      pi.events.emit('wecom:status', { authenticated: true });
-      console.log('[WeCom] 🔐 认证成功');
+      pi.events.emit("wecom:status", { authenticated: true });
+      console.log("[WeCom] authenticated");
     });
 
-    // 断开连接
-    wsClient.on('disconnected', (reason: string) => {
+    wsClient.on("disconnected", (reason: string) => {
       state.connected = false;
       state.authenticated = false;
-      pi.events.emit('wecom:status', { connected: false });
-      console.log(`[WeCom] 🔌 连接断开: ${reason}`);
+      pi.events.emit("wecom:status", { connected: false, reason });
+      console.log(`[WeCom] disconnected: ${reason}`);
     });
 
-    // 重连中
-    wsClient.on('reconnecting', (attempt: number) => {
-      console.log(`[WeCom] 🔄 正在重连（第 ${attempt} 次）...`);
+    wsClient.on("reconnecting", (attempt: number) => {
+      console.log(`[WeCom] reconnecting, attempt ${attempt}`);
     });
 
-    // 错误
-    wsClient.on('error', (error: Error) => {
-      console.error('[WeCom] ❌ 错误:', error.message);
+    wsClient.on("error", (error: Error) => {
+      console.error("[WeCom] client error:", error.message);
     });
 
-    // 文本消息
-    wsClient.on('message.text', async (frame: WsFrame) => {
+    wsClient.on("message.text", async (frame: WsFrame) => {
       await handleWeComMessage(frame);
     });
 
-    // 进入会话
-    wsClient.on('event.enter_chat', async (frame: WsFrame) => {
+    wsClient.on("event.enter_chat", async (frame: WsFrame) => {
       await handleEnterChat(frame);
     });
 
-    // 模板卡片事件
-    wsClient.on('event.template_card_event', async (frame: WsFrame) => {
+    wsClient.on("event.template_card_event", async (frame: WsFrame) => {
       await handleTemplateCardEvent(frame);
     });
 
     return wsClient;
   }
 
-  // 处理 WeCom 消息
   async function handleWeComMessage(frame: WsFrame): Promise<void> {
-    console.log('[WeCom Debug] handleWeComMessage 被调用');
-    console.log('[WeCom Debug] frame.body:', JSON.stringify(frame.body, null, 2));
-    
     const body = frame.body;
-    const content = body.text?.content || '';
-    const chatId = body.chatid || body.from?.userid || '';
-    const userId = body.from?.userid || '';
-    const chatType = body.chattype || 'single';
+    const content = body.text?.content || "";
+    const chatId = body.chatid || body.from?.userid || "";
+    const userId = body.from?.userid || "";
+    const chatType = (body.chattype || "single") as "single" | "group";
 
-    console.log(`[WeCom] 💬 收到消息 [${chatType}] ${userId}: ${content}`);
-    console.log(`[WeCom Debug] chatId = ${chatId}, userId = ${userId}`);
-
-    // 生成流式消息 ID
-    const streamId = generateReqId('stream');
-
-    // 记录待处理请求
-    pendingRequests.set(chatId, {
-      frame,
-      streamId,
-      accumulatedContent: '',
-      startTime: Date.now(),
-    });
-
-    // 记录最近联系的用户
+    const streamId = generateReqId("stream");
+    pendingRequests.set(chatId, { frame, streamId });
     lastContact = { userId, chatId, chatType };
-
-    // 设置当前处理的 chatid
     currentChatId = chatId;
-
-    // 重置响应发送标志
     responseSent = false;
 
-    // 清空响应缓冲
-    aiResponseBuffer = '';
-
-    // 发送"思考中"状态
     try {
-      await client?.replyStream(frame, streamId, '🤔 正在思考...', false);
-    } catch (err) {
-      console.error('[WeCom] 发送思考状态失败:', err);
+      await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
+    } catch (error) {
+      console.error("[WeCom] failed to send thinking status:", error);
     }
 
-    // 构建用户消息，附带上下文信息
-    let userMessage = content;
-    if (chatType === 'group') {
-      userMessage = `[企业微信群聊消息] 用户 ${userId} 说：${content}`;
-    } else {
-      userMessage = `[企业微信私聊消息] ${content}`;
-    }
+    const userMessage =
+      chatType === "group"
+        ? `[wecom group message] user ${userId} says: ${content}`
+        : `[wecom direct message] ${content}`;
 
-    // 发送给 AI 处理
-    console.log('[WeCom Debug] 调用 pi.sendUserMessage...');
     pi.sendUserMessage(userMessage);
-    console.log('[WeCom Debug] pi.sendUserMessage 已返回');
   }
 
-  // 处理进入会话事件
   async function handleEnterChat(frame: WsFrame): Promise<void> {
-    const userId = frame.body.from?.userid || '';
-    console.log(`[WeCom] 👋 用户 ${userId} 进入会话`);
-
     try {
       await client?.replyWelcome(frame, {
-        msgtype: 'text',
-        text: { content: `👋 您好！我是 ${MY_NAME} ，有什么可以帮您的吗？` },
+        msgtype: "text",
+        text: { content: `Hello, I am ${AGENT_NAME}. What can I help with?` },
       });
-    } catch (err) {
-      console.error('[WeCom] 发送欢迎语失败:', err);
+    } catch (error) {
+      console.error("[WeCom] failed to send welcome message:", error);
     }
   }
 
-  // 处理模板卡片事件
   async function handleTemplateCardEvent(frame: WsFrame): Promise<void> {
     const eventKey = frame.body.event?.event_key;
     const taskId = frame.body.event?.task_id;
-    console.log(`[WeCom] 🃏 模板卡片事件: ${eventKey}`);
 
-    // 可以根据 eventKey 执行不同操作
     try {
       await client?.updateTemplateCard(frame, {
-        card_type: 'text_notice',
-        main_title: { title: `已收到操作: ${eventKey}` },
+        card_type: "text_notice",
+        main_title: { title: `Received action: ${eventKey}` },
         task_id: taskId,
       });
-    } catch (err) {
-      console.error('[WeCom] 更新卡片失败:', err);
+    } catch (error) {
+      console.error("[WeCom] failed to update template card:", error);
     }
   }
 
-  // 发送 AI 响应到 WeCom
-  async function sendResponseToWeCom(chatId: string, content: string, isFinal: boolean = true): Promise<void> {
-    console.log(`[WeCom Debug] sendResponseToWeCom: chatId = ${chatId}, content length = ${content.length}, isFinal = ${isFinal}`);
+  async function sendResponseToWeCom(chatId: string, content: string): Promise<void> {
     const pending = pendingRequests.get(chatId);
     if (!pending || !client) {
-      console.log(`[WeCom Debug] sendResponseToWeCom: 未找到待处理请求或客户端为空`);
-      console.log(`[WeCom Debug] pending = ${pending ? 'exists' : 'null'}, client = ${client ? 'exists' : 'null'}`);
       return;
     }
 
-    const { frame, streamId } = pending;
-    console.log(`[WeCom Debug] sendResponseToWeCom: 准备发送响应，streamId = ${streamId}`);
-
     try {
-      // 发送流式回复
-      await client.replyStream(frame, streamId, content, isFinal);
-      
-      if (isFinal) {
-        pendingRequests.delete(chatId);
-        console.log(`[WeCom] ✅ 响应已发送`);
-      } else {
-        console.log(`[WeCom Debug] 流式响应片段已发送`);
-      }
-    } catch (err) {
-      console.error('[WeCom] 发送响应失败:', err);
+      await client.replyStream(pending.frame, pending.streamId, content, true);
+      pendingRequests.delete(chatId);
+    } catch (error) {
+      console.error("[WeCom] failed to send response:", error);
     }
   }
 
-  // 监听所有 agent 相关事件用于调试
-  pi.on('agent_start', async (event, ctx) => {
-    console.log(`[WeCom Debug] agent_start 触发`);
-  });
-
-  pi.on('agent_end', async (event, ctx) => {
-    console.log(`[WeCom Debug] agent_end 触发`);
-  });
-
-  pi.on('turn_start', async (event, ctx) => {
-    console.log(`[WeCom Debug] turn_start 触发, turnIndex = ${event.turnIndex}`);
-  });
-
-  pi.on('message_start', async (event, ctx) => {
-    const msg = event.message;
-    console.log(`[WeCom Debug] message_start: role = ${msg?.role}, currentChatId = ${currentChatId}`);
-  });
-
-  // 监听 message_end 事件 - 在 assistant 消息完成时触发
-  pi.on('message_end', async (event, ctx) => {
+  pi.on("message_end", async (event) => {
     const message = event.message;
-    
-    console.log(`[WeCom Debug] message_end: role = ${message?.role}, currentChatId = ${currentChatId}, responseSent = ${responseSent}`);
-    console.log(`[WeCom Debug] message_end: pendingRequests keys = [${Array.from(pendingRequests.keys()).join(', ')}]`);
-    
-    // 只处理 assistant 消息
-    if (!message || message.role !== 'assistant') {
-      console.log(`[WeCom Debug] message_end: 跳过，非 assistant 消息`);
-      return;
-    }
-    
-    // 检查是否有待处理的 WeCom 请求
-    if (!currentChatId) {
-      console.log(`[WeCom Debug] message_end: 跳过，没有 currentChatId`);
-      return;
-    }
-
-    // 如果已经发送过响应，跳过
-    if (responseSent) {
-      console.log(`[WeCom Debug] message_end: 跳过，响应已发送`);
+    if (!message || message.role !== "assistant" || !currentChatId || responseSent) {
       return;
     }
 
     const pending = pendingRequests.get(currentChatId);
     if (!pending) {
-      console.log(`[WeCom Debug] message_end: 跳过，没有 pending request`);
       return;
     }
 
-    // 打印消息内容结构
-    console.log(`[WeCom Debug] message_end: content types = [${message.content.map(c => c.type).join(', ')}]`);
-
-    // 提取文本内容
-    const textContents = message.content.filter((c): c is { type: 'text'; text: string } => c.type === 'text');
-    const toolUses = message.content.filter(c => c.type === 'toolUse');
-    
-    console.log(`[WeCom Debug] message_end: 文本块数量 = ${textContents.length}, 工具调用数量 = ${toolUses.length}`);
-
-    const content = textContents.map(c => c.text).join('\n');
-
-    console.log(`[WeCom Debug] message_end: 文本内容长度 = ${content.length}`);
-
-    // 检查是否有工具调用 - 如果有工具调用，说明 AI 还在处理中，不发送响应
+    const toolUses = message.content.filter((content: any) => content.type === "toolUse");
     if (toolUses.length > 0) {
-      console.log(`[WeCom Debug] message_end: 检测到 ${toolUses.length} 个工具调用，等待后续处理...`);
       return;
     }
 
-    // 如果有文本内容，发送响应
-    if (content) {
-      console.log(`[WeCom Debug] message_end: 发送响应，内容: ${content.substring(0, 100)}...`);
-      responseSent = true;
-      await sendResponseToWeCom(currentChatId, content, true);
-      // 清理状态
-      currentChatId = null;
-    } else {
-      console.log(`[WeCom Debug] message_end: 没有文本内容，不发送响应`);
+    const textContent = message.content
+      .filter((content: any): content is { type: "text"; text: string } => content.type === "text")
+      .map((content) => content.text)
+      .join("\n")
+      .trim();
+
+    if (!textContent) {
+      return;
     }
+
+    responseSent = true;
+    await sendResponseToWeCom(currentChatId, textContent);
+    currentChatId = null;
   });
 
-  // 监听 tool_result 事件
-  pi.on('tool_result', async (event, ctx) => {
-    console.log(`[WeCom Debug] tool_result: toolName = ${event.toolName}, currentChatId = ${currentChatId}`);
-  });
-
-  // 监听 turn_end 事件 - 作为备份，确保响应被发送
-  pi.on('turn_end', async (event, ctx) => {
-    console.log(`[WeCom Debug] turn_end: turnIndex = ${event.turnIndex}, currentChatId = ${currentChatId}, responseSent = ${responseSent}`);
-    
-    // 检查是否有待处理的 WeCom 请求
-    if (!currentChatId) {
-      console.log(`[WeCom Debug] turn_end: 没有待处理的请求`);
-      return;
-    }
-
-    // 如果已经发送过响应，跳过
-    if (responseSent) {
-      console.log(`[WeCom Debug] turn_end: 跳过，响应已发送`);
-      return;
-    }
-
-    const pending = pendingRequests.get(currentChatId);
-    if (!pending) {
-      console.log(`[WeCom Debug] turn_end: 未找到 pending request`);
-      return;
-    }
-
-    // 从 turn_end 的 message 中提取文本内容
-    const message = event.message;
-    if (!message) {
-      console.log(`[WeCom Debug] turn_end: 没有 message`);
-      return;
-    }
-
-    console.log(`[WeCom Debug] turn_end: message role = ${message.role}, content types = [${message.content?.map(c => c.type).join(', ') || 'empty'}]`);
-
-    if (message.role !== 'assistant') {
-      console.log(`[WeCom Debug] turn_end: 跳过，非 assistant 消息`);
-      return;
-    }
-
-    const textContents = message.content?.filter((c): c is { type: 'text'; text: string } => c.type === 'text') || [];
-    const toolUses = message.content?.filter(c => c.type === 'toolUse') || [];
-    const content = textContents.map(c => c.text).join('\n');
-
-    console.log(`[WeCom Debug] turn_end: 文本内容长度 = ${content.length}, 工具调用数量 = ${toolUses.length}`);
-
-    // 如果有工具调用，不清理状态，等待后续处理
-    if (toolUses.length > 0) {
-      console.log(`[WeCom Debug] turn_end: 检测到工具调用，保持状态等待后续处理`);
-      return;
-    }
-
-    if (content) {
-      console.log(`[WeCom Debug] turn_end: 发送响应`);
-      responseSent = true;
-      await sendResponseToWeCom(currentChatId, content, true);
-      // 只有在发送响应后才清理状态
-      currentChatId = null;
-    } else {
-      console.log(`[WeCom Debug] turn_end: 没有文本内容，保持状态等待 message_end`);
-    }
-  });
-
-  // 注册 /wecom 命令
-  pi.registerCommand('wecom', {
-    description: '企业微信机器人管理',
+  pi.registerCommand("wecom", {
+    description: "Manage the WeCom bot connection and notifications",
     handler: async (args, ctx) => {
       const trimmedArgs = args.trim();
-      const subCommand = trimmedArgs.split(/\s+/)[0].toLowerCase();
+      const [subCommand = "status", ...rest] = trimmedArgs.split(/\s+/);
+      const normalized = subCommand.toLowerCase();
 
-      switch (subCommand) {
-        case 'status':
+      switch (normalized) {
+        case "status": {
+          const notifyTarget = getNotifyTarget();
           ctx.ui.notify(
-            `状态: ${state.connected ? '已连接' : '未连接'}, ` +
-            `认证: ${state.authenticated ? '成功' : '未认证'}` +
-            (state.botId ? `, BotID: ${state.botId}` : ''),
-            state.connected ? 'success' : 'warning'
+            `connected=${state.connected}, authenticated=${state.authenticated}, notifyTarget=${notifyTarget.chatId || "unset"}`,
+            state.connected ? "info" : "warning",
           );
-          break;
+          return;
+        }
 
-        case 'connect':
+        case "connect": {
           if (state.connected) {
-            ctx.ui.notify('已经连接', 'warning');
-            return;
-          }
-          
-          const config = getConfig();
-          if (!config) {
-            ctx.ui.notify('请设置 WECOM_BOT_ID 和 WECOM_BOT_SECRET 环境变量', 'error');
+            ctx.ui.notify("WeCom is already connected", "warning");
             return;
           }
 
-          client = initClient(config.botId, config.secret);
+          const wecomConfig = getConfig();
+          if (!wecomConfig) {
+            ctx.ui.notify("Missing WECOM_BOT_ID or WECOM_BOT_SECRET", "error");
+            return;
+          }
+
+          client = initClient(wecomConfig.botId, wecomConfig.secret);
           client.connect();
-          ctx.ui.notify('正在连接...', 'info');
-          break;
+          ctx.ui.notify("Connecting to WeCom...", "info");
+          return;
+        }
 
-        case 'disconnect':
-          if (client) {
-            client.disconnect();
-            client = null;
-            state.connected = false;
-            state.authenticated = false;
-            ctx.ui.notify('已断开连接', 'info');
-          } else {
-            ctx.ui.notify('未连接', 'warning');
-          }
-          break;
-
-        case 'send':
-          if (!client || !state.connected) {
-            ctx.ui.notify('未连接', 'error');
+        case "disconnect": {
+          if (!client) {
+            ctx.ui.notify("WeCom is not connected", "warning");
             return;
           }
+
+          client.disconnect();
+          client = null;
+          state.connected = false;
+          state.authenticated = false;
+          ctx.ui.notify("Disconnected from WeCom", "info");
+          return;
+        }
+
+        case "send": {
           if (!lastContact) {
-            ctx.ui.notify('没有最近联系的用户', 'warning');
+            ctx.ui.notify("No recent WeCom contact is available", "warning");
             return;
           }
-          const msg = args.replace(/^send\s+/i, '').trim();
-          if (!msg) {
-            ctx.ui.notify('用法: /wecom send <消息内容>', 'info');
+
+          const message = rest.join(" ").trim();
+          if (!message) {
+            ctx.ui.notify("Usage: /wecom send <message>", "info");
             return;
           }
+
           try {
-            await client.sendMessage(lastContact.chatId, {
-              msgtype: 'markdown',
-              markdown: { content: msg },
-            });
-            ctx.ui.notify(`已发送给 ${lastContact.userId}`, 'success');
-            console.log(`[WeCom] 📤 已发送消息给 ${lastContact.userId}: ${msg}`);
-          } catch (err) {
-            ctx.ui.notify('发送失败', 'error');
-            console.error('[WeCom] 发送失败:', err);
+            const result = await sendMarkdown(message, lastContact.chatId);
+            if (!result.ok) {
+              ctx.ui.notify(result.reason || "Send failed", "error");
+              return;
+            }
+            ctx.ui.notify(`Sent to ${lastContact.userId}`, "info");
+          } catch (error) {
+            ctx.ui.notify("Send failed", "error");
+            console.error("[WeCom] send command failed:", error);
           }
-          break;
+          return;
+        }
+
+        case "notify": {
+          const message = rest.join(" ").trim();
+          if (!message) {
+            ctx.ui.notify("Usage: /wecom notify <message>", "info");
+            return;
+          }
+
+          try {
+            const result = await sendMarkdown(message);
+            if (!result.ok) {
+              ctx.ui.notify(result.reason || "Notify failed", "error");
+              return;
+            }
+            ctx.ui.notify("Notification sent", "info");
+          } catch (error) {
+            ctx.ui.notify("Notify failed", "error");
+            console.error("[WeCom] notify command failed:", error);
+          }
+          return;
+        }
 
         default:
-          ctx.ui.notify(
-            '用法: /wecom [status|connect|disconnect]',
-            'info'
-          );
+          ctx.ui.notify("Usage: /wecom [status|connect|disconnect|send|notify]", "info");
       }
     },
   });
 
-  // 会话启动时自动连接
-  pi.on('session_start', async (_event, ctx) => {
-    const config = getConfig();
-    if (config) {
-      console.log('[WeCom] 🚀 自动连接企业微信机器人...');
-      client = initClient(config.botId, config.secret);
-      client.connect();
-    } else {
-      console.log('[WeCom] ⚠️ 未配置 WECOM_BOT_ID 和 WECOM_BOT_SECRET');
+  pi.on("session_start", async () => {
+    const wecomConfig = getConfig();
+    if (!wecomConfig) {
+      console.log("[WeCom] credentials are not configured");
+      return;
     }
+
+    client = initClient(wecomConfig.botId, wecomConfig.secret);
+    client.connect();
+
+    cleanups.push(pi.events.on("wecom:notify", (payload) => {
+      void handleNotifyEvent(payload);
+    }));
   });
 
-  // 会话关闭时断开连接
-  pi.on('session_shutdown', async () => {
+  pi.on("session_shutdown", async () => {
+    while (cleanups.length > 0) {
+      cleanups.pop()?.();
+    }
+
     if (client) {
-      console.log('[WeCom] 👋 断开连接...');
       client.disconnect();
       client = null;
     }
