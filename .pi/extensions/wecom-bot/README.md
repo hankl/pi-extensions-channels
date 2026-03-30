@@ -44,7 +44,6 @@ WECOM_BOT_SECRET=your-bot-secret
 | `/wecom send <消息>` | 发送消息给最近联系人 |
 | `/wecom notify <消息>` | 发送消息给预设通知目标 |
 | `/wecom reminder [子命令]` | 管理定时提醒 |
-| `/wecom github [子命令]` | 管理 GitHub Trending 推送 |
 | `/wecom today [子命令]` | 管理 GitHub 今日新上榜推送 |
 
 #### 命令详情
@@ -89,34 +88,6 @@ WECOM_BOT_SECRET=your-bot-secret
   WECOM_REMINDER_ENABLED=true
   WECOM_REMINDER_TIME=19:30
   WECOM_REMINDER_MESSAGE=👋 下班时间到！
-  ```
-
-**`/wecom github [子命令]`**
-管理 GitHub Trending 定时推送功能：
-
-| 子命令 | 说明 |
-|--------|------|
-| `github status` | 查看 GitHub Trending 状态 |
-| `github on` | 开启 GitHub Trending 推送 |
-| `github off` | 关闭 GitHub Trending 推送 |
-| `github time HH:MM` | 设置推送时间 |
-| `github lang <语言>` | 设置筛选语言 (如 TypeScript, Python) |
-| `github now` | 立即获取并发送 Trending |
-| `github test` | 发送测试推送 |
-
-- **使用示例**：
-  ```
-  /wecom github on
-  /wecom github time 20:00
-  /wecom github lang TypeScript
-  /wecom github now
-  ```
-
-- **环境变量配置**：
-  ```
-  WECOM_GITHUB_TRENDING_ENABLED=true
-  WECOM_GITHUB_TRENDING_TIME=20:00
-  WECOM_GITHUB_TRENDING_LANGUAGE=TypeScript
   ```
 
 **`/wecom today [子命令]`**

@@ -37,13 +37,6 @@ interface ReminderState {
   message: string;
 }
 
-interface GitHubTrendingState {
-  enabled: boolean;
-  hour: number;
-  minute: number;
-  language?: string;
-}
-
 interface GitHubTodayState {
   enabled: boolean;
   hour: number;
@@ -56,13 +49,29 @@ interface WeComState {
   authenticated: boolean;
   botId?: string;
   reminder: ReminderState;
-  githubTrending: GitHubTrendingState;
   githubToday: GitHubTodayState;
 }
 
 interface PendingRequest {
   frame: WsFrame;
   streamId: string;
+}
+
+interface ActiveSession {
+  chatId: string;
+  userId: string;
+  chatType: "single" | "group";
+  frame: WsFrame;
+  streamId: string;
+  startedAt: number;
+  ackSent: boolean;
+  awaitingUserInput: boolean;
+  finalSent: boolean;
+  lastAssistantText?: string;
+  pendingFinalText?: string;
+  lastProgressAt?: number;
+  heartbeatCount: number;
+  lastProgressMessage?: string;
 }
 
 interface LastContact {
@@ -86,12 +95,62 @@ function getCuteThinkingStatus(): string {
   return CUTE_THINKING_STATES[index];
 }
 
+function normalizeText(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function extractAssistantText(message: any): string {
+  if (!message?.content || !Array.isArray(message.content)) {
+    return "";
+  }
+
+  return normalizeText(
+    message.content
+      .filter((content: any): content is { type: "text"; text: string } => content.type === "text")
+      .map((content) => content.text)
+      .join("\n"),
+  );
+}
+
+function hasToolUse(message: any): boolean {
+  return Array.isArray(message?.content) && message.content.some((content: any) => content.type === "toolUse");
+}
+
+function isLikelyUserInputRequest(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return [
+    "\u8bf7\u786e\u8ba4",
+    "\u8bf7\u63d0\u4f9b",
+    "\u8bf7\u544a\u8bc9\u6211",
+    "\u8bf7\u56de\u590d",
+    "\u9700\u8981\u4f60",
+    "\u9700\u8981\u60a8",
+    "\u8fd8\u9700\u8981",
+    "\u7f3a\u5c11",
+    "\u65e0\u6cd5\u7ee7\u7eed",
+    "\u8bf7\u5148",
+    "\u544a\u8bc9\u6211",
+    "confirm",
+    "provide",
+    "need your",
+    "i need",
+    "which one",
+    "what is",
+    "please reply",
+  ].some((pattern) => normalized.includes(pattern)) || /[?\uFF1F]\s*$/.test(text);
+}
+
+function buildProgressMessage(title: string, text?: string): string {
+  return text ? `**${title}**\n${text}` : `**${title}**`;
+}
+
 export default function wecomBotExtension(pi: ExtensionAPI) {
   let client: any = null;
   let lastContact: LastContact | null = null;
-  let currentChatId: string | null = null;
-  let responseSent = false;
+  let currentWeComRunChatId: string | null = null;
+  let progressHeartbeat: ReturnType<typeof setInterval> | null = null;
   const pendingRequests = new Map<string, PendingRequest>();
+  const activeSessions = new Map<string, ActiveSession>();
   const cleanups: Array<() => void> = [];
 
   const state: WeComState = {
@@ -102,12 +161,6 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       hour: 19,
       minute: 30,
       message: "👋 下班时间到！记得收拾好东西，愉快回家～",
-    },
-    githubTrending: {
-      enabled: false,
-      hour: 20,
-      minute: 0,
-      language: undefined,
     },
     githubToday: {
       enabled: false,
@@ -181,68 +234,8 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   }
 
   // GitHub Trending Job
-  let githubTrendingJob: cron.ScheduledTask | null = null;
-
-  function loadGitHubTrendingConfig(): void {
-    const trendingTime = process.env.WECOM_GITHUB_TRENDING_TIME?.trim();
-    const trendingLang = process.env.WECOM_GITHUB_TRENDING_LANGUAGE?.trim();
-
-    if (trendingTime) {
-      const [hour, minute] = trendingTime.split(":").map(Number);
-      if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
-        state.githubTrending.hour = hour;
-        state.githubTrending.minute = minute;
-      }
-    }
-
-    if (trendingLang) {
-      state.githubTrending.language = trendingLang;
-    }
-
-    state.githubTrending.enabled = process.env.WECOM_GITHUB_TRENDING_ENABLED === "true";
-  }
-
-  async function fetchGitHubTrending(language?: string): Promise<string> {
-    const url = language
-      ? `https://api.github.com/search/repositories?q=stars:>1+language:${language}&sort=stars&order=desc&per_page=10`
-      : `https://api.github.com/search/repositories?q=stars:>1&sort=stars&order=desc&per_page=10`;
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "Accept": "application/vnd.github.v3+json",
-          "User-Agent": "WeCom-Bot/1.0",
-        },
-      });
-
-      if (!response.ok) {
-        throw new Error(`GitHub API error: ${response.status}`);
-      }
-
-      const data = await response.json() as { items: Array<{ name: string; description: string | null; stargazers_count: number; html_url: string; language: string | null; author: string }> };
-
-      if (!data.items || data.items.length === 0) {
-        return "📊 今天没有找到热门的仓库";
-      }
-
-      const langLabel = language ? `${language} ` : "";
-      let message = `📊 **GitHub ${langLabel}Trending** (Top 10)\n\n`;
-
-      data.items.slice(0, 10).forEach((repo, index) => {
-        const desc = repo.description || "暂无描述";
-        const lang = repo.language ? ` [${repo.language}]` : "";
-        const stars = formatStars(repo.stargazers_count);
-        message += `${index + 1}. **[${repo.name}](${repo.html_url})** ${lang}\n`;
-        message += `   ⭐ ${stars} | ${desc}\n\n`;
-      });
-
-      message += `---\n> 🔗 查看更多: https://github.com/trending`;
-      return message;
-    } catch (error) {
-      console.error("[WeCom] GitHub trending fetch failed:", error);
-      return "😢 获取 GitHub Trending 失败了，明天再试吧～";
-    }
-  }
+  // GitHub Today Job (new repositories from today)
+  let githubTodayJob: cron.ScheduledTask | null = null;
 
   function formatStars(count: number): string {
     if (count >= 1000) {
@@ -250,57 +243,6 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
     return `${count} ⭐`;
   }
-
-  async function sendGitHubTrending(): Promise<void> {
-    const target = resolveChatTarget();
-    if (!target.chatId) {
-      console.log("[WeCom] GitHub trending skipped: no notify target configured");
-      return;
-    }
-
-    try {
-      const summary = await fetchGitHubTrending(state.githubTrending.language);
-      await sendMarkdown(summary, target.chatId);
-      console.log("[WeCom] GitHub trending sent successfully");
-    } catch (error) {
-      console.error("[WeCom] GitHub trending failed:", error);
-    }
-  }
-
-  function startGitHubTrendingJob(): void {
-    if (githubTrendingJob) {
-      githubTrendingJob.stop();
-    }
-
-    const cronExpr = `${state.githubTrending.minute} ${state.githubTrending.hour} * * *`;
-    console.log(`[WeCom] GitHub trending scheduled at ${state.githubTrending.hour}:${String(state.githubTrending.minute).padStart(2, "0")}`);
-
-    githubTrendingJob = cron.schedule(cronExpr, async () => {
-      if (!state.githubTrending.enabled) {
-        return;
-      }
-
-      console.log("[WeCom] Fetching GitHub trending...");
-      await sendGitHubTrending();
-    });
-  }
-
-  function stopGitHubTrendingJob(): void {
-    if (githubTrendingJob) {
-      githubTrendingJob.stop();
-      githubTrendingJob = null;
-      console.log("[WeCom] GitHub trending job stopped");
-    }
-  }
-
-  function getGitHubTrendingStatus(): string {
-    const time = `${String(state.githubTrending.hour).padStart(2, "0")}:${String(state.githubTrending.minute).padStart(2, "0")}`;
-    const lang = state.githubTrending.language || "all";
-    return `enabled=${state.githubTrending.enabled}, time=${time}, language=${lang}`;
-  }
-
-  // GitHub Today Job (new repositories from today)
-  let githubTodayJob: cron.ScheduledTask | null = null;
 
   function loadGitHubTodayConfig(): void {
     const todayTime = process.env.WECOM_GITHUB_TODAY_TIME?.trim();
@@ -488,6 +430,111 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     }
   }
 
+  function getActiveSession(chatId?: string | null): ActiveSession | null {
+    if (!chatId) {
+      return null;
+    }
+    return activeSessions.get(chatId) || null;
+  }
+
+  async function sendSessionStream(chatId: string, content: string, finished: boolean): Promise<boolean> {
+    const pending = pendingRequests.get(chatId);
+    if (!pending || !client) {
+      return false;
+    }
+
+    const text = normalizeText(content);
+    if (!text) {
+      return false;
+    }
+
+    try {
+      await client.replyStream(pending.frame, pending.streamId, text, finished);
+      if (finished) {
+        pendingRequests.delete(chatId);
+      }
+      return true;
+    } catch (error) {
+      console.error("[WeCom] failed to send stream response:", error);
+      return false;
+    }
+  }
+
+  async function sendSessionProgress(chatId: string, title: string, text?: string): Promise<void> {
+    const session = getActiveSession(chatId);
+    if (!session || session.finalSent) {
+      return;
+    }
+
+    const now = Date.now();
+    const message = buildProgressMessage(title, text);
+    if (message === session.lastProgressMessage) {
+      return;
+    }
+
+    session.lastProgressAt = now;
+    session.lastProgressMessage = message;
+    const streamed = await sendSessionStream(chatId, message, false);
+    if (!streamed) {
+      await sendMarkdown(message, chatId);
+    }
+  }
+
+  async function finalizeSession(chatId: string, content: string): Promise<void> {
+    const session = getActiveSession(chatId);
+    if (!session || session.finalSent) {
+      return;
+    }
+
+    const text = normalizeText(content);
+    if (!text) {
+      return;
+    }
+
+    const streamed = await sendSessionStream(chatId, text, true);
+    if (!streamed) {
+      await sendMarkdown(buildProgressMessage("\u5904\u7406\u5b8c\u6210", text), chatId);
+    }
+
+    session.finalSent = true;
+    session.awaitingUserInput = false;
+    session.pendingFinalText = undefined;
+    if (currentWeComRunChatId === chatId) {
+      currentWeComRunChatId = null;
+    }
+  }
+
+  function stopProgressHeartbeat(): void {
+    if (progressHeartbeat) {
+      clearInterval(progressHeartbeat);
+      progressHeartbeat = null;
+    }
+  }
+
+  function startProgressHeartbeat(chatId: string): void {
+    stopProgressHeartbeat();
+    progressHeartbeat = setInterval(() => {
+      const session = getActiveSession(chatId);
+      if (!session || session.finalSent || session.awaitingUserInput) {
+        stopProgressHeartbeat();
+        return;
+      }
+
+      const lastProgressAt = session.lastProgressAt || session.startedAt;
+      if (session.heartbeatCount >= 1 || Date.now() - lastProgressAt < 90000) {
+        return;
+      }
+
+      session.lastProgressAt = Date.now();
+      session.heartbeatCount += 1;
+      void sendSessionProgress(
+        chatId,
+        "\u5904\u7406\u4e2d",
+        "\u8fd8\u5728\u6267\u884c\u4e2d\uff0c\u8bf7\u7a0d\u7b49\u3002",
+      );
+    }, 30000);
+  }
+
   function initClient(botId: string, secret: string): any {
     const wsClient = new WSClient({
       botId,
@@ -547,9 +594,20 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
 
     const streamId = generateReqId("stream");
     pendingRequests.set(chatId, { frame, streamId });
+    activeSessions.set(chatId, {
+      chatId,
+      userId,
+      chatType,
+      frame,
+      streamId,
+      startedAt: Date.now(),
+      ackSent: false,
+      awaitingUserInput: false,
+      finalSent: false,
+      heartbeatCount: 0,
+    });
     lastContact = { userId, chatId, chatType };
-    currentChatId = chatId;
-    responseSent = false;
+    currentWeComRunChatId = chatId;
 
     try {
       await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
@@ -592,48 +650,118 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   }
 
   async function sendResponseToWeCom(chatId: string, content: string): Promise<void> {
-    const pending = pendingRequests.get(chatId);
-    if (!pending || !client) {
-      return;
-    }
-
-    try {
-      await client.replyStream(pending.frame, pending.streamId, content, true);
-      pendingRequests.delete(chatId);
-    } catch (error) {
-      console.error("[WeCom] failed to send response:", error);
-    }
+    await finalizeSession(chatId, content);
   }
 
   pi.on("message_end", async (event) => {
     const message = event.message;
-    if (!message || message.role !== "assistant" || !currentChatId || responseSent) {
+    if (!message || message.role !== "assistant" || !currentWeComRunChatId) {
       return;
     }
 
-    const pending = pendingRequests.get(currentChatId);
-    if (!pending) {
+    const session = getActiveSession(currentWeComRunChatId);
+    if (!session) {
       return;
     }
 
-    // const toolUses = message.content.filter((content: any) => content.type === "toolUse");
-    // if (toolUses.length > 0) {
-    //   return;
-    // }
+    const textContent = extractAssistantText(message);
+    const containsToolUse = hasToolUse(message);
 
-    const textContent = message.content
-      .filter((content: any): content is { type: "text"; text: string } => content.type === "text")
-      .map((content) => content.text)
-      .join("\n")
-      .trim();
-
-    if (!textContent) {
+    if (!textContent && !containsToolUse) {
       return;
     }
 
-    responseSent = true;
-    await sendResponseToWeCom(currentChatId, textContent);
-    currentChatId = null;
+    if (textContent && textContent === session.lastAssistantText) {
+      return;
+    }
+
+    if (textContent) {
+      session.lastAssistantText = textContent;
+    }
+
+    if (containsToolUse) {
+      await sendSessionProgress(
+        session.chatId,
+        "\u5904\u7406\u4e2d",
+        textContent || "\u6b63\u5728\u6267\u884c\u64cd\u4f5c\uff0c\u5b8c\u6210\u540e\u6211\u4f1a\u628a\u7ed3\u679c\u53d1\u7ed9\u4f60\u3002",
+      );
+      return;
+    }
+
+    if (textContent && isLikelyUserInputRequest(textContent)) {
+      session.awaitingUserInput = true;
+      session.pendingFinalText = undefined;
+      await sendSessionProgress(session.chatId, "\u9700\u8981\u4f60\u534f\u52a9", textContent);
+      return;
+    }
+
+    session.awaitingUserInput = false;
+    session.pendingFinalText = textContent;
+  });
+
+  pi.on("agent_start", async () => {
+    if (!currentWeComRunChatId) {
+      return;
+    }
+
+    const session = getActiveSession(currentWeComRunChatId);
+    if (!session || session.finalSent) {
+      return;
+    }
+
+    startProgressHeartbeat(session.chatId);
+
+    if (session.ackSent) {
+      return;
+    }
+
+    session.ackSent = true;
+    session.lastProgressAt = Date.now();
+    await sendSessionProgress(
+      session.chatId,
+      getCuteThinkingStatus(),
+    );
+  });
+
+  pi.on("agent_end", async () => {
+    stopProgressHeartbeat();
+
+    if (!currentWeComRunChatId) {
+      return;
+    }
+
+    const session = getActiveSession(currentWeComRunChatId);
+    if (!session || session.finalSent) {
+      currentWeComRunChatId = null;
+      return;
+    }
+
+    if (session.awaitingUserInput) {
+      currentWeComRunChatId = null;
+      return;
+    }
+
+    const finalText = session.pendingFinalText || session.lastAssistantText;
+    if (finalText) {
+      await sendResponseToWeCom(session.chatId, finalText);
+      activeSessions.delete(session.chatId);
+      return;
+    }
+
+    currentWeComRunChatId = null;
+  });
+
+  pi.on("input", async (event) => {
+    if (event.source === "extension" || !lastContact) {
+      return;
+    }
+
+    const session = getActiveSession(lastContact.chatId);
+    if (!session || !session.awaitingUserInput) {
+      return;
+    }
+
+    session.awaitingUserInput = false;
   });
 
   pi.registerCommand("wecom", {
@@ -813,103 +941,6 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
           }
         }
 
-        case "github": {
-          const subCmd = rest[0]?.toLowerCase() || "status";
-
-          switch (subCmd) {
-            case "on": {
-              state.githubTrending.enabled = true;
-              startGitHubTrendingJob();
-              ctx.ui.notify("GitHub trending enabled", "info");
-              return;
-            }
-
-            case "off": {
-              state.githubTrending.enabled = false;
-              ctx.ui.notify("GitHub trending disabled", "info");
-              return;
-            }
-
-            case "time": {
-              const timeStr = rest[1];
-              if (!timeStr) {
-                const current = `${String(state.githubTrending.hour).padStart(2, "0")}:${String(state.githubTrending.minute).padStart(2, "0")}`;
-                ctx.ui.notify(`Current time: ${current}. Usage: /wecom github time HH:MM`, "info");
-                return;
-              }
-
-              const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
-              if (!match) {
-                ctx.ui.notify("Invalid format. Use HH:MM (e.g., 20:00)", "error");
-                return;
-              }
-
-              const hour = parseInt(match[1], 10);
-              const minute = parseInt(match[2], 10);
-
-              if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
-                ctx.ui.notify("Invalid time. Hour 0-23, Minute 0-59", "error");
-                return;
-              }
-
-              state.githubTrending.hour = hour;
-              state.githubTrending.minute = minute;
-
-              if (state.githubTrending.enabled) {
-                startGitHubTrendingJob();
-              }
-
-              ctx.ui.notify(`GitHub trending time set to ${timeStr}`, "info");
-              return;
-            }
-
-            case "lang":
-            case "language": {
-              const lang = rest[1]?.trim();
-              if (!lang) {
-                const current = state.githubTrending.language || "all";
-                ctx.ui.notify(`Current language: ${current}. Usage: /wecom github lang <language>`, "info");
-                return;
-              }
-              state.githubTrending.language = lang;
-              ctx.ui.notify(`GitHub trending language set to ${lang}`, "info");
-              return;
-            }
-
-            case "now":
-            case "fetch": {
-              ctx.ui.notify("Fetching GitHub trending...", "info");
-              const summary = await fetchGitHubTrending(state.githubTrending.language);
-              const target = resolveChatTarget();
-              if (target.chatId) {
-                await sendMarkdown(summary, target.chatId);
-                ctx.ui.notify("GitHub trending sent!", "info");
-              } else {
-                ctx.ui.notify("No notify target available", "error");
-              }
-              return;
-            }
-
-            case "test": {
-              const target = resolveChatTarget();
-              if (!target.chatId) {
-                ctx.ui.notify("No notify target available", "error");
-                return;
-              }
-              const summary = await fetchGitHubTrending(state.githubTrending.language);
-              const result = await sendMarkdown(summary, target.chatId);
-              ctx.ui.notify(result.ok ? "Test sent!" : (result.reason || "Failed"), result.ok ? "info" : "error");
-              return;
-            }
-
-            case "status":
-            default: {
-              ctx.ui.notify(getGitHubTrendingStatus(), "info");
-              return;
-            }
-          }
-        }
-
         case "today": {
           const subCmd = rest[0]?.toLowerCase() || "status";
 
@@ -1025,11 +1056,6 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       startReminderJob();
     }
 
-    loadGitHubTrendingConfig();
-    if (state.githubTrending.enabled) {
-      startGitHubTrendingJob();
-    }
-
     loadGitHubTodayConfig();
     if (state.githubToday.enabled) {
       startGitHubTodayJob();
@@ -1048,8 +1074,8 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       cleanups.pop()?.();
     }
 
+    stopProgressHeartbeat();
     stopReminderJob();
-    stopGitHubTrendingJob();
     stopGitHubTodayJob();
 
     if (client) {
