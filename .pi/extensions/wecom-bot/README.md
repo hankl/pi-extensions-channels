@@ -42,6 +42,10 @@ WECOM_BOT_SECRET=your-bot-secret
 | `/wecom connect` | 手动连接企微机器人 |
 | `/wecom disconnect` | 断开连接 |
 | `/wecom send <消息>` | 发送消息给最近联系人 |
+| `/wecom notify <消息>` | 发送消息给预设通知目标 |
+| `/wecom reminder [子命令]` | 管理定时提醒 |
+| `/wecom github [子命令]` | 管理 GitHub Trending 推送 |
+| `/wecom today [子命令]` | 管理 GitHub 今日新上榜推送 |
 
 #### 命令详情
 
@@ -57,20 +61,91 @@ WECOM_BOT_SECRET=your-bot-secret
 **`/wecom send <消息>`**
 主动发送消息给最近联系的用户。
 
-- **前提条件**：
-  1. 机器人已连接（`/wecom status` 显示已连接）
-  2. 有最近联系人（需要先收到过该用户的消息）
+**`/wecom notify <消息>`**
+主动发送消息给预设的通知目标（`WECOM_NOTIFY_CHAT_ID`）。
+
+**`/wecom reminder [子命令]`**
+管理定时提醒功能：
+
+| 子命令 | 说明 |
+|--------|------|
+| `reminder status` | 查看提醒状态 |
+| `reminder on` | 开启定时提醒 |
+| `reminder off` | 关闭定时提醒 |
+| `reminder time HH:MM` | 设置提醒时间 |
+| `reminder message <文本>` | 设置提醒消息 |
+| `reminder test` | 发送测试提醒 |
 
 - **使用示例**：
   ```
-  /wecom send 你好，有什么可以帮你的？
-  /wecom send 今天的报告已生成，请查收。
+  /wecom reminder on
+  /wecom reminder time 19:30
+  /wecom reminder message 下班时间到！
+  /wecom reminder test
   ```
 
-- **注意事项**：
-  - 消息格式为 Markdown
-  - 发送目标是最近一次交互的用户
-  - 如果没有最近联系人，会提示"没有最近联系的用户"
+- **环境变量配置**：
+  ```
+  WECOM_REMINDER_ENABLED=true
+  WECOM_REMINDER_TIME=19:30
+  WECOM_REMINDER_MESSAGE=👋 下班时间到！
+  ```
+
+**`/wecom github [子命令]`**
+管理 GitHub Trending 定时推送功能：
+
+| 子命令 | 说明 |
+|--------|------|
+| `github status` | 查看 GitHub Trending 状态 |
+| `github on` | 开启 GitHub Trending 推送 |
+| `github off` | 关闭 GitHub Trending 推送 |
+| `github time HH:MM` | 设置推送时间 |
+| `github lang <语言>` | 设置筛选语言 (如 TypeScript, Python) |
+| `github now` | 立即获取并发送 Trending |
+| `github test` | 发送测试推送 |
+
+- **使用示例**：
+  ```
+  /wecom github on
+  /wecom github time 20:00
+  /wecom github lang TypeScript
+  /wecom github now
+  ```
+
+- **环境变量配置**：
+  ```
+  WECOM_GITHUB_TRENDING_ENABLED=true
+  WECOM_GITHUB_TRENDING_TIME=20:00
+  WECOM_GITHUB_TRENDING_LANGUAGE=TypeScript
+  ```
+
+**`/wecom today [子命令]`**
+管理 GitHub 今日新上榜定时推送（今天创建的新项目）：
+
+| 子命令 | 说明 |
+|--------|------|
+| `today status` | 查看状态 |
+| `today on` | 开启推送 |
+| `today off` | 关闭推送 |
+| `today time HH:MM` | 设置推送时间 |
+| `today lang <语言>` | 设置筛选语言 |
+| `today now` | 立即获取并发送 |
+| `today test` | 发送测试推送 |
+
+- **使用示例**：
+  ```
+  /wecom today on
+  /wecom today time 20:15
+  /wecom today lang Python
+  /wecom today now
+  ```
+
+- **环境变量配置**：
+  ```
+  WECOM_GITHUB_TODAY_ENABLED=true
+  WECOM_GITHUB_TODAY_TIME=20:15
+  WECOM_GITHUB_TODAY_LANGUAGE=Python
+  ```
 
 ### 工作流程
 

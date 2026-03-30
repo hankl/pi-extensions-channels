@@ -3,6 +3,7 @@ import pkg from "@wecom/aibot-node-sdk";
 import { config } from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import cron from "node-cron";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -29,10 +30,34 @@ const CUTE_THINKING_STATES = [
   "✨ 马上就好...",
 ];
 
+interface ReminderState {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  message: string;
+}
+
+interface GitHubTrendingState {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  language?: string;
+}
+
+interface GitHubTodayState {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+  language?: string;
+}
+
 interface WeComState {
   connected: boolean;
   authenticated: boolean;
   botId?: string;
+  reminder: ReminderState;
+  githubTrending: GitHubTrendingState;
+  githubToday: GitHubTodayState;
 }
 
 interface PendingRequest {
@@ -72,7 +97,328 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   const state: WeComState = {
     connected: false,
     authenticated: false,
+    reminder: {
+      enabled: false,
+      hour: 19,
+      minute: 30,
+      message: "👋 下班时间到！记得收拾好东西，愉快回家～",
+    },
+    githubTrending: {
+      enabled: false,
+      hour: 20,
+      minute: 0,
+      language: undefined,
+    },
+    githubToday: {
+      enabled: false,
+      hour: 20,
+      minute: 15,
+      language: undefined,
+    },
   };
+
+  // Load reminder config from environment
+  function loadReminderConfig(): void {
+    const reminderTime = process.env.WECOM_REMINDER_TIME?.trim();
+    const reminderMessage = process.env.WECOM_REMINDER_MESSAGE?.trim();
+
+    if (reminderTime) {
+      const [hour, minute] = reminderTime.split(":").map(Number);
+      if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        state.reminder.hour = hour;
+        state.reminder.minute = minute;
+      }
+    }
+
+    if (reminderMessage) {
+      state.reminder.message = reminderMessage;
+    }
+
+    state.reminder.enabled = process.env.WECOM_REMINDER_ENABLED === "true";
+  }
+
+  let reminderJob: cron.ScheduledTask | null = null;
+
+  function startReminderJob(): void {
+    if (reminderJob) {
+      reminderJob.stop();
+    }
+
+    const cronExpr = `${state.reminder.minute} ${state.reminder.hour} * * *`;
+    console.log(`[WeCom] Reminder scheduled at ${state.reminder.hour}:${String(state.reminder.minute).padStart(2, "0")}`);
+
+    reminderJob = cron.schedule(cronExpr, async () => {
+      if (!state.reminder.enabled) {
+        return;
+      }
+
+      const target = resolveChatTarget();
+      if (!target.chatId) {
+        console.log("[WeCom] Reminder skipped: no notify target configured");
+        return;
+      }
+
+      try {
+        await sendMarkdown(state.reminder.message, target.chatId);
+        console.log("[WeCom] Reminder sent successfully");
+      } catch (error) {
+        console.error("[WeCom] Reminder failed:", error);
+      }
+    });
+  }
+
+  function stopReminderJob(): void {
+    if (reminderJob) {
+      reminderJob.stop();
+      reminderJob = null;
+      console.log("[WeCom] Reminder job stopped");
+    }
+  }
+
+  function getReminderStatus(): string {
+    const time = `${String(state.reminder.hour).padStart(2, "0")}:${String(state.reminder.minute).padStart(2, "0")}`;
+    return `enabled=${state.reminder.enabled}, time=${time}, message="${state.reminder.message}"`;
+  }
+
+  // GitHub Trending Job
+  let githubTrendingJob: cron.ScheduledTask | null = null;
+
+  function loadGitHubTrendingConfig(): void {
+    const trendingTime = process.env.WECOM_GITHUB_TRENDING_TIME?.trim();
+    const trendingLang = process.env.WECOM_GITHUB_TRENDING_LANGUAGE?.trim();
+
+    if (trendingTime) {
+      const [hour, minute] = trendingTime.split(":").map(Number);
+      if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        state.githubTrending.hour = hour;
+        state.githubTrending.minute = minute;
+      }
+    }
+
+    if (trendingLang) {
+      state.githubTrending.language = trendingLang;
+    }
+
+    state.githubTrending.enabled = process.env.WECOM_GITHUB_TRENDING_ENABLED === "true";
+  }
+
+  async function fetchGitHubTrending(language?: string): Promise<string> {
+    const url = language
+      ? `https://api.github.com/search/repositories?q=stars:>1+language:${language}&sort=stars&order=desc&per_page=10`
+      : `https://api.github.com/search/repositories?q=stars:>1&sort=stars&order=desc&per_page=10`;
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "WeCom-Bot/1.0",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`GitHub API error: ${response.status}`);
+      }
+
+      const data = await response.json() as { items: Array<{ name: string; description: string | null; stargazers_count: number; html_url: string; language: string | null; author: string }> };
+
+      if (!data.items || data.items.length === 0) {
+        return "📊 今天没有找到热门的仓库";
+      }
+
+      const langLabel = language ? `${language} ` : "";
+      let message = `📊 **GitHub ${langLabel}Trending** (Top 10)\n\n`;
+
+      data.items.slice(0, 10).forEach((repo, index) => {
+        const desc = repo.description || "暂无描述";
+        const lang = repo.language ? ` [${repo.language}]` : "";
+        const stars = formatStars(repo.stargazers_count);
+        message += `${index + 1}. **[${repo.name}](${repo.html_url})** ${lang}\n`;
+        message += `   ⭐ ${stars} | ${desc}\n\n`;
+      });
+
+      message += `---\n> 🔗 查看更多: https://github.com/trending`;
+      return message;
+    } catch (error) {
+      console.error("[WeCom] GitHub trending fetch failed:", error);
+      return "😢 获取 GitHub Trending 失败了，明天再试吧～";
+    }
+  }
+
+  function formatStars(count: number): string {
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}k ⭐`;
+    }
+    return `${count} ⭐`;
+  }
+
+  async function sendGitHubTrending(): Promise<void> {
+    const target = resolveChatTarget();
+    if (!target.chatId) {
+      console.log("[WeCom] GitHub trending skipped: no notify target configured");
+      return;
+    }
+
+    try {
+      const summary = await fetchGitHubTrending(state.githubTrending.language);
+      await sendMarkdown(summary, target.chatId);
+      console.log("[WeCom] GitHub trending sent successfully");
+    } catch (error) {
+      console.error("[WeCom] GitHub trending failed:", error);
+    }
+  }
+
+  function startGitHubTrendingJob(): void {
+    if (githubTrendingJob) {
+      githubTrendingJob.stop();
+    }
+
+    const cronExpr = `${state.githubTrending.minute} ${state.githubTrending.hour} * * *`;
+    console.log(`[WeCom] GitHub trending scheduled at ${state.githubTrending.hour}:${String(state.githubTrending.minute).padStart(2, "0")}`);
+
+    githubTrendingJob = cron.schedule(cronExpr, async () => {
+      if (!state.githubTrending.enabled) {
+        return;
+      }
+
+      console.log("[WeCom] Fetching GitHub trending...");
+      await sendGitHubTrending();
+    });
+  }
+
+  function stopGitHubTrendingJob(): void {
+    if (githubTrendingJob) {
+      githubTrendingJob.stop();
+      githubTrendingJob = null;
+      console.log("[WeCom] GitHub trending job stopped");
+    }
+  }
+
+  function getGitHubTrendingStatus(): string {
+    const time = `${String(state.githubTrending.hour).padStart(2, "0")}:${String(state.githubTrending.minute).padStart(2, "0")}`;
+    const lang = state.githubTrending.language || "all";
+    return `enabled=${state.githubTrending.enabled}, time=${time}, language=${lang}`;
+  }
+
+  // GitHub Today Job (new repositories from today)
+  let githubTodayJob: cron.ScheduledTask | null = null;
+
+  function loadGitHubTodayConfig(): void {
+    const todayTime = process.env.WECOM_GITHUB_TODAY_TIME?.trim();
+    const todayLang = process.env.WECOM_GITHUB_TODAY_LANGUAGE?.trim();
+
+    if (todayTime) {
+      const [hour, minute] = todayTime.split(":").map(Number);
+      if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        state.githubToday.hour = hour;
+        state.githubToday.minute = minute;
+      }
+    }
+
+    if (todayLang) {
+      state.githubToday.language = todayLang;
+    }
+
+    state.githubToday.enabled = process.env.WECOM_GITHUB_TODAY_ENABLED === "true";
+  }
+
+  function getTodayDateString(): string {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, "0");
+    const day = String(today.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  async function fetchGitHubToday(language?: string): Promise<string> {
+    const today = getTodayDateString();
+    const langFilter = language ? `+language:${language}` : "";
+    const url = `https://api.github.com/search/repositories?q=created:>${today}${langFilter}&sort=stars&order=desc&per_page=10`;
+
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "WeCom-Bot/1.0",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`GitHub API error: ${response.status}`);
+      }
+
+      const data = await response.json() as { total_count: number; items: Array<{ name: string; description: string | null; stargazers_count: number; html_url: string; language: string | null; author: string; created_at: string }> };
+
+      if (!data.items || data.items.length === 0) {
+        const langLabel = language ? `${language} ` : "";
+        return `🆕 **GitHub 今日新上榜 (${langLabel})**\n\n今天还没有新项目上榜，稍后再来看看吧～`;
+      }
+
+      const langLabel = language ? `${language} ` : "";
+      let message = `🆕 **GitHub 今日新上榜 (${langLabel}Top ${data.items.length})**\n\n`;
+
+      data.items.slice(0, 10).forEach((repo, index) => {
+        const desc = repo.description || "暂无描述";
+        const lang = repo.language ? ` [${repo.language}]` : "";
+        const stars = formatStars(repo.stargazers_count);
+        message += `${index + 1}. **[${repo.name}](${repo.html_url})** ${lang}\n`;
+        message += `   ⭐ ${stars} | ${desc}\n\n`;
+      });
+
+      message += `---\n> 🔗 查看更多: https://github.com/trending`;
+      return message;
+    } catch (error) {
+      console.error("[WeCom] GitHub today fetch failed:", error);
+      return "😢 获取 GitHub 今日新上榜失败了，明天再试吧～";
+    }
+  }
+
+  async function sendGitHubToday(): Promise<void> {
+    const target = resolveChatTarget();
+    if (!target.chatId) {
+      console.log("[WeCom] GitHub today skipped: no notify target configured");
+      return;
+    }
+
+    try {
+      const summary = await fetchGitHubToday(state.githubToday.language);
+      await sendMarkdown(summary, target.chatId);
+      console.log("[WeCom] GitHub today sent successfully");
+    } catch (error) {
+      console.error("[WeCom] GitHub today failed:", error);
+    }
+  }
+
+  function startGitHubTodayJob(): void {
+    if (githubTodayJob) {
+      githubTodayJob.stop();
+    }
+
+    const cronExpr = `${state.githubToday.minute} ${state.githubToday.hour} * * *`;
+    console.log(`[WeCom] GitHub today scheduled at ${state.githubToday.hour}:${String(state.githubToday.minute).padStart(2, "0")}`);
+
+    githubTodayJob = cron.schedule(cronExpr, async () => {
+      if (!state.githubToday.enabled) {
+        return;
+      }
+
+      console.log("[WeCom] Fetching GitHub today...");
+      await sendGitHubToday();
+    });
+  }
+
+  function stopGitHubTodayJob(): void {
+    if (githubTodayJob) {
+      githubTodayJob.stop();
+      githubTodayJob = null;
+      console.log("[WeCom] GitHub today job stopped");
+    }
+  }
+
+  function getGitHubTodayStatus(): string {
+    const time = `${String(state.githubToday.hour).padStart(2, "0")}:${String(state.githubToday.minute).padStart(2, "0")}`;
+    const lang = state.githubToday.language || "all";
+    return `enabled=${state.githubToday.enabled}, time=${time}, language=${lang}`;
+  }
 
   function getConfig(): { botId: string; secret: string } | null {
     const botId = process.env.WECOM_BOT_ID;
@@ -270,10 +616,10 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       return;
     }
 
-    const toolUses = message.content.filter((content: any) => content.type === "toolUse");
-    if (toolUses.length > 0) {
-      return;
-    }
+    // const toolUses = message.content.filter((content: any) => content.type === "toolUse");
+    // if (toolUses.length > 0) {
+    //   return;
+    // }
 
     const textContent = message.content
       .filter((content: any): content is { type: "text"; text: string } => content.type === "text")
@@ -386,6 +732,281 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
           return;
         }
 
+        case "reminder": {
+          const subCmd = rest[0]?.toLowerCase() || "status";
+
+          switch (subCmd) {
+            case "on": {
+              state.reminder.enabled = true;
+              startReminderJob();
+              ctx.ui.notify("Reminder enabled", "info");
+              return;
+            }
+
+            case "off": {
+              state.reminder.enabled = false;
+              ctx.ui.notify("Reminder disabled", "info");
+              return;
+            }
+
+            case "time": {
+              const timeStr = rest[1];
+              if (!timeStr) {
+                const current = `${String(state.reminder.hour).padStart(2, "0")}:${String(state.reminder.minute).padStart(2, "0")}`;
+                ctx.ui.notify(`Current reminder time: ${current}. Usage: /wecom reminder time HH:MM`, "info");
+                return;
+              }
+
+              const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+              if (!match) {
+                ctx.ui.notify("Invalid format. Use HH:MM (e.g., 19:30)", "error");
+                return;
+              }
+
+              const hour = parseInt(match[1], 10);
+              const minute = parseInt(match[2], 10);
+
+              if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                ctx.ui.notify("Invalid time. Hour 0-23, Minute 0-59", "error");
+                return;
+              }
+
+              state.reminder.hour = hour;
+              state.reminder.minute = minute;
+
+              if (state.reminder.enabled) {
+                startReminderJob();
+              }
+
+              ctx.ui.notify(`Reminder time set to ${timeStr}`, "info");
+              return;
+            }
+
+            case "message": {
+              const msg = rest.slice(1).join(" ").trim();
+              if (!msg) {
+                ctx.ui.notify(`Current: "${state.reminder.message}". Usage: /wecom reminder message <text>`, "info");
+                return;
+              }
+              state.reminder.message = msg;
+              ctx.ui.notify("Reminder message updated", "info");
+              return;
+            }
+
+            case "test": {
+              const target = resolveChatTarget();
+              if (!target.chatId) {
+                ctx.ui.notify("No notify target available", "error");
+                return;
+              }
+              const testMsg = `🕐 测试提醒: ${state.reminder.message}`;
+              const result = await sendMarkdown(testMsg, target.chatId);
+              ctx.ui.notify(result.ok ? "Test reminder sent" : (result.reason || "Failed"), result.ok ? "info" : "error");
+              return;
+            }
+
+            case "status":
+            default: {
+              ctx.ui.notify(getReminderStatus(), "info");
+              return;
+            }
+          }
+        }
+
+        case "github": {
+          const subCmd = rest[0]?.toLowerCase() || "status";
+
+          switch (subCmd) {
+            case "on": {
+              state.githubTrending.enabled = true;
+              startGitHubTrendingJob();
+              ctx.ui.notify("GitHub trending enabled", "info");
+              return;
+            }
+
+            case "off": {
+              state.githubTrending.enabled = false;
+              ctx.ui.notify("GitHub trending disabled", "info");
+              return;
+            }
+
+            case "time": {
+              const timeStr = rest[1];
+              if (!timeStr) {
+                const current = `${String(state.githubTrending.hour).padStart(2, "0")}:${String(state.githubTrending.minute).padStart(2, "0")}`;
+                ctx.ui.notify(`Current time: ${current}. Usage: /wecom github time HH:MM`, "info");
+                return;
+              }
+
+              const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+              if (!match) {
+                ctx.ui.notify("Invalid format. Use HH:MM (e.g., 20:00)", "error");
+                return;
+              }
+
+              const hour = parseInt(match[1], 10);
+              const minute = parseInt(match[2], 10);
+
+              if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                ctx.ui.notify("Invalid time. Hour 0-23, Minute 0-59", "error");
+                return;
+              }
+
+              state.githubTrending.hour = hour;
+              state.githubTrending.minute = minute;
+
+              if (state.githubTrending.enabled) {
+                startGitHubTrendingJob();
+              }
+
+              ctx.ui.notify(`GitHub trending time set to ${timeStr}`, "info");
+              return;
+            }
+
+            case "lang":
+            case "language": {
+              const lang = rest[1]?.trim();
+              if (!lang) {
+                const current = state.githubTrending.language || "all";
+                ctx.ui.notify(`Current language: ${current}. Usage: /wecom github lang <language>`, "info");
+                return;
+              }
+              state.githubTrending.language = lang;
+              ctx.ui.notify(`GitHub trending language set to ${lang}`, "info");
+              return;
+            }
+
+            case "now":
+            case "fetch": {
+              ctx.ui.notify("Fetching GitHub trending...", "info");
+              const summary = await fetchGitHubTrending(state.githubTrending.language);
+              const target = resolveChatTarget();
+              if (target.chatId) {
+                await sendMarkdown(summary, target.chatId);
+                ctx.ui.notify("GitHub trending sent!", "info");
+              } else {
+                ctx.ui.notify("No notify target available", "error");
+              }
+              return;
+            }
+
+            case "test": {
+              const target = resolveChatTarget();
+              if (!target.chatId) {
+                ctx.ui.notify("No notify target available", "error");
+                return;
+              }
+              const summary = await fetchGitHubTrending(state.githubTrending.language);
+              const result = await sendMarkdown(summary, target.chatId);
+              ctx.ui.notify(result.ok ? "Test sent!" : (result.reason || "Failed"), result.ok ? "info" : "error");
+              return;
+            }
+
+            case "status":
+            default: {
+              ctx.ui.notify(getGitHubTrendingStatus(), "info");
+              return;
+            }
+          }
+        }
+
+        case "today": {
+          const subCmd = rest[0]?.toLowerCase() || "status";
+
+          switch (subCmd) {
+            case "on": {
+              state.githubToday.enabled = true;
+              startGitHubTodayJob();
+              ctx.ui.notify("GitHub today enabled", "info");
+              return;
+            }
+
+            case "off": {
+              state.githubToday.enabled = false;
+              ctx.ui.notify("GitHub today disabled", "info");
+              return;
+            }
+
+            case "time": {
+              const timeStr = rest[1];
+              if (!timeStr) {
+                const current = `${String(state.githubToday.hour).padStart(2, "0")}:${String(state.githubToday.minute).padStart(2, "0")}`;
+                ctx.ui.notify(`Current time: ${current}. Usage: /wecom today time HH:MM`, "info");
+                return;
+              }
+
+              const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+              if (!match) {
+                ctx.ui.notify("Invalid format. Use HH:MM (e.g., 20:15)", "error");
+                return;
+              }
+
+              const hour = parseInt(match[1], 10);
+              const minute = parseInt(match[2], 10);
+
+              if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                ctx.ui.notify("Invalid time. Hour 0-23, Minute 0-59", "error");
+                return;
+              }
+
+              state.githubToday.hour = hour;
+              state.githubToday.minute = minute;
+
+              if (state.githubToday.enabled) {
+                startGitHubTodayJob();
+              }
+
+              ctx.ui.notify(`GitHub today time set to ${timeStr}`, "info");
+              return;
+            }
+
+            case "lang":
+            case "language": {
+              const lang = rest[1]?.trim();
+              if (!lang) {
+                const current = state.githubToday.language || "all";
+                ctx.ui.notify(`Current language: ${current}. Usage: /wecom today lang <language>`, "info");
+                return;
+              }
+              state.githubToday.language = lang;
+              ctx.ui.notify(`GitHub today language set to ${lang}`, "info");
+              return;
+            }
+
+            case "now":
+            case "fetch": {
+              ctx.ui.notify("Fetching GitHub today...", "info");
+              const summary = await fetchGitHubToday(state.githubToday.language);
+              const target = resolveChatTarget();
+              if (target.chatId) {
+                await sendMarkdown(summary, target.chatId);
+                ctx.ui.notify("GitHub today sent!", "info");
+              } else {
+                ctx.ui.notify("No notify target available", "error");
+              }
+              return;
+            }
+
+            case "test": {
+              const target = resolveChatTarget();
+              if (!target.chatId) {
+                ctx.ui.notify("No notify target available", "error");
+                return;
+              }
+              const summary = await fetchGitHubToday(state.githubToday.language);
+              const result = await sendMarkdown(summary, target.chatId);
+              ctx.ui.notify(result.ok ? "Test sent!" : (result.reason || "Failed"), result.ok ? "info" : "error");
+              return;
+            }
+
+            case "status":
+            default: {
+              ctx.ui.notify(getGitHubTodayStatus(), "info");
+              return;
+            }
+          }
+        }
+
         default:
           ctx.ui.notify("Usage: /wecom [status|connect|disconnect|send|notify]", "info");
       }
@@ -397,6 +1018,21 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     if (!wecomConfig) {
       console.log("[WeCom] credentials are not configured");
       return;
+    }
+
+    loadReminderConfig();
+    if (state.reminder.enabled) {
+      startReminderJob();
+    }
+
+    loadGitHubTrendingConfig();
+    if (state.githubTrending.enabled) {
+      startGitHubTrendingJob();
+    }
+
+    loadGitHubTodayConfig();
+    if (state.githubToday.enabled) {
+      startGitHubTodayJob();
     }
 
     client = initClient(wecomConfig.botId, wecomConfig.secret);
@@ -411,6 +1047,10 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     while (cleanups.length > 0) {
       cleanups.pop()?.();
     }
+
+    stopReminderJob();
+    stopGitHubTrendingJob();
+    stopGitHubTodayJob();
 
     if (client) {
       client.disconnect();
