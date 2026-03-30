@@ -274,7 +274,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
   async function fetchGitHubToday(language?: string): Promise<string> {
     const today = getTodayDateString();
     const langFilter = language ? `+language:${language}` : "";
-    const url = `https://api.github.com/search/repositories?q=created:>${today}${langFilter}&sort=stars&order=desc&per_page=10`;
+    const url = `https://api.github.com/search/repositories?q=pushed:>=${today}${langFilter}+stars:>10&sort=stars&order=desc&per_page=10`;
 
     try {
       const response = await fetch(url, {
@@ -288,29 +288,38 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
         throw new Error(`GitHub API error: ${response.status}`);
       }
 
-      const data = await response.json() as { total_count: number; items: Array<{ name: string; description: string | null; stargazers_count: number; html_url: string; language: string | null; author: string; created_at: string }> };
+      const data = await response.json() as {
+        total_count: number;
+        items: Array<{
+          name: string;
+          description: string | null;
+          stargazers_count: number;
+          html_url: string;
+          language: string | null;
+          updated_at: string;
+        }>;
+      };
 
+      const titleSuffix = language ? ` (${language})` : "";
       if (!data.items || data.items.length === 0) {
-        const langLabel = language ? `${language} ` : "";
-        return `🆕 **GitHub 今日新上榜 (${langLabel})**\n\n今天还没有新项目上榜，稍后再来看看吧～`;
+        return `\u{1F4CA} **GitHub \u6BCF\u65E5\u699C\u5355${titleSuffix}**\n\n\u4ECA\u5929\u8FD8\u6CA1\u6709\u6293\u5230\u5408\u9002\u7684\u699C\u5355\u7ED3\u679C\uff0c\u7A0D\u540E\u518D\u6765\u770B\u770B\u5427\uFF5E`;
       }
 
-      const langLabel = language ? `${language} ` : "";
-      let message = `🆕 **GitHub 今日新上榜 (${langLabel}Top ${data.items.length})**\n\n`;
+      let message = `\u{1F4CA} **GitHub \u6BCF\u65E5\u699C\u5355${titleSuffix}** (Top ${data.items.length})\n\n`;
 
       data.items.slice(0, 10).forEach((repo, index) => {
-        const desc = repo.description || "暂无描述";
+        const desc = repo.description || "\u6682\u65E0\u63CF\u8FF0";
         const lang = repo.language ? ` [${repo.language}]` : "";
         const stars = formatStars(repo.stargazers_count);
-        message += `${index + 1}. **[${repo.name}](${repo.html_url})** ${lang}\n`;
-        message += `   ⭐ ${stars} | ${desc}\n\n`;
+        message += `${index + 1}. **[${repo.name}](${repo.html_url})**${lang}\n`;
+        message += `   \u2B50 ${stars} | ${desc}\n\n`;
       });
 
-      message += `---\n> 🔗 查看更多: https://github.com/trending`;
+      message += `---\n> \u{1F517} https://github.com/trending`;
       return message;
     } catch (error) {
       console.error("[WeCom] GitHub today fetch failed:", error);
-      return "😢 获取 GitHub 今日新上榜失败了，明天再试吧～";
+      return "\u{1F622} \u83B7\u53D6 GitHub \u6BCF\u65E5\u699C\u5355\u5931\u8D25\u4E86\uff0c\u7A0D\u540E\u518D\u8BD5\u5427\uFF5E";
     }
   }
 
