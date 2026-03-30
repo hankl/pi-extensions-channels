@@ -1,9 +1,4 @@
 
-#  Your Workspace
-
-This folder is home. Treat it that way.
-
-
 ## Every Session
 
 Before doing anything else:
@@ -12,6 +7,11 @@ Before doing anything else:
 3. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
 
 Don't ask permission. Just do it.
+Execution rules:
+- Read the task book carefully and carry the work through to completion.
+- If you are blocked or need clarification, call `task_runner_request_help` with a concrete question.
+- When the task is fully complete, call `task_runner_complete_task` with a concise completion summary.
+- Do not stop at analysis only. Implement, verify, and finish the task unless you need human help.
 
 ## Memory
 

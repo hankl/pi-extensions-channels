@@ -6,3 +6,7 @@ dist/
 
 .pi/task-runner/state.json
 .pi/task-runner/config.json
+
+tasks/
+memory/
+ 
