@@ -44,6 +44,12 @@ interface GitHubTodayState {
   language?: string;
 }
 
+interface SixtySecondsState {
+  enabled: boolean;
+  hour: number;
+  minute: number;
+}
+
 interface WeComState {
   connected: boolean;
   authenticated: boolean;
@@ -167,6 +173,11 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       hour: 20,
       minute: 15,
       language: undefined,
+    },
+    sixtySeconds: {
+      enabled: false,
+      hour: 17,
+      minute: 30,
     },
   };
 
@@ -369,6 +380,134 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     const time = `${String(state.githubToday.hour).padStart(2, "0")}:${String(state.githubToday.minute).padStart(2, "0")}`;
     const lang = state.githubToday.language || "all";
     return `enabled=${state.githubToday.enabled}, time=${time}, language=${lang}`;
+  }
+
+  // Sixty Seconds News Job
+  let sixtySecondsJob: cron.ScheduledTask | null = null;
+
+  function loadSixtySecondsConfig(): void {
+    const newsTime = process.env.WECOM_60S_NEWS_TIME?.trim();
+
+    if (newsTime) {
+      const [hour, minute] = newsTime.split(":").map(Number);
+      if (!isNaN(hour) && !isNaN(minute) && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+        state.sixtySeconds.hour = hour;
+        state.sixtySeconds.minute = minute;
+      }
+    }
+
+    state.sixtySeconds.enabled = process.env.WECOM_60S_NEWS_ENABLED === "true";
+  }
+
+  async function fetchSixtySecondsData(): Promise<{ news: string[]; image: string } | null> {
+    // 使用 https://60s.viki.moe API
+    const apiUrl = "https://60s.viki.moe/v2/60s";
+
+    try {
+      const response = await fetch(apiUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+          "Accept": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status}`);
+      }
+
+      const data = await response.json() as {
+        code: number;
+        data?: {
+          news: string[];
+          image: string;
+        };
+      };
+
+      if (data.code === 200 && data.data) {
+        console.log(`[WeCom] Fetched 60s news: ${data.data.news.length} items, image: ${data.data.image}`);
+        return data.data;
+      }
+
+      return null;
+    } catch (error) {
+      console.error("[WeCom] Failed to fetch 60s news:", error);
+      return null;
+    }
+  }
+
+  async function sendSixtySecondsNews(): Promise<void> {
+    const target = resolveChatTarget();
+    if (!target.chatId) {
+      console.log("[WeCom] 60s news skipped: no notify target configured");
+      return;
+    }
+
+    if (!client || !state.connected) {
+      console.log("[WeCom] Client not connected, cannot send 60s news");
+      return;
+    }
+
+    try {
+      console.log("[WeCom] Fetching 60s news from viki.moe...");
+      const newsData = await fetchSixtySecondsData();
+
+      if (!newsData) {
+        console.log("[WeCom] Failed to fetch 60s news data");
+        await sendMarkdown("📰 **60秒读懂世界**\n\n获取今日资讯失败，请稍后重试~", target.chatId);
+        return;
+      }
+
+      const imageUrl = newsData.image;
+      console.log(`[WeCom] 60s news image URL: ${imageUrl}`);
+
+      // 发送精美的图文卡片
+      const newsList = newsData.news.map((item, i) => `${i + 1}. ${item}`).join("\n");
+      const today = new Date();
+      const dateStr = `${today.getMonth() + 1}月${today.getDate()}日`;
+
+      const message = `📰 **60秒读懂世界** ${dateStr}\n\n${newsList}\n\n---\n\n🖼️ **图片版**: [点击查看今日热点图片](${imageUrl})\n\n> 💡 数据来源: [60s.viki.moe](https://60s.viki.moe)`;
+
+      await sendMarkdown(message, target.chatId);
+      console.log("[WeCom] 60s news sent successfully");
+    } catch (error) {
+      console.error("[WeCom] 60s news failed:", error);
+      try {
+        await sendMarkdown("📰 **60秒读懂世界**\n\n⚠️ 获取今日资讯失败，请稍后重试~", target.chatId);
+      } catch (e) {
+        console.error("[WeCom] Failed to send error message:", e);
+      }
+    }
+  }
+
+  function startSixtySecondsJob(): void {
+    if (sixtySecondsJob) {
+      sixtySecondsJob.stop();
+    }
+
+    const cronExpr = `${state.sixtySeconds.minute} ${state.sixtySeconds.hour} * * *`;
+    console.log(`[WeCom] 60s news scheduled at ${state.sixtySeconds.hour}:${String(state.sixtySeconds.minute).padStart(2, "0")}`);
+
+    sixtySecondsJob = cron.schedule(cronExpr, async () => {
+      if (!state.sixtySeconds.enabled) {
+        return;
+      }
+
+      console.log("[WeCom] Sending 60s news...");
+      await sendSixtySecondsNews();
+    });
+  }
+
+  function stopSixtySecondsJob(): void {
+    if (sixtySecondsJob) {
+      sixtySecondsJob.stop();
+      sixtySecondsJob = null;
+      console.log("[WeCom] 60s news job stopped");
+    }
+  }
+
+  function getSixtySecondsStatus(): string {
+    const time = `${String(state.sixtySeconds.hour).padStart(2, "0")}:${String(state.sixtySeconds.minute).padStart(2, "0")}`;
+    return `enabled=${state.sixtySeconds.enabled}, time=${time}`;
   }
 
   function getConfig(): { botId: string; secret: string } | null {
@@ -1047,8 +1186,75 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
           }
         }
 
+        case "news60": {
+          const subCmd = rest[0]?.toLowerCase() || "status";
+
+          switch (subCmd) {
+            case "on": {
+              state.sixtySeconds.enabled = true;
+              startSixtySecondsJob();
+              ctx.ui.notify("60s news enabled", "info");
+              return;
+            }
+
+            case "off": {
+              state.sixtySeconds.enabled = false;
+              ctx.ui.notify("60s news disabled", "info");
+              return;
+            }
+
+            case "time": {
+              const timeStr = rest[1];
+              if (!timeStr) {
+                const current = `${String(state.sixtySeconds.hour).padStart(2, "0")}:${String(state.sixtySeconds.minute).padStart(2, "0")}`;
+                ctx.ui.notify(`Current time: ${current}. Usage: /wecom news60 time HH:MM`, "info");
+                return;
+              }
+
+              const match = timeStr.match(/^(\d{1,2}):(\d{2})$/);
+              if (!match) {
+                ctx.ui.notify("Invalid format. Use HH:MM (e.g., 17:30)", "error");
+                return;
+              }
+
+              const hour = parseInt(match[1], 10);
+              const minute = parseInt(match[2], 10);
+
+              if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+                ctx.ui.notify("Invalid time. Hour 0-23, Minute 0-59", "error");
+                return;
+              }
+
+              state.sixtySeconds.hour = hour;
+              state.sixtySeconds.minute = minute;
+
+              if (state.sixtySeconds.enabled) {
+                startSixtySecondsJob();
+              }
+
+              ctx.ui.notify(`60s news time set to ${timeStr}`, "info");
+              return;
+            }
+
+            case "now":
+            case "send":
+            case "test": {
+              ctx.ui.notify("Sending 60s news...", "info");
+              await sendSixtySecondsNews();
+              ctx.ui.notify("60s news sent!", "info");
+              return;
+            }
+
+            case "status":
+            default: {
+              ctx.ui.notify(getSixtySecondsStatus(), "info");
+              return;
+            }
+          }
+        }
+
         default:
-          ctx.ui.notify("Usage: /wecom [status|connect|disconnect|send|notify]", "info");
+          ctx.ui.notify("Usage: /wecom [status|connect|disconnect|send|notify|reminder|today|news60]", "info");
       }
     },
   });
@@ -1070,6 +1276,11 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       startGitHubTodayJob();
     }
 
+    loadSixtySecondsConfig();
+    if (state.sixtySeconds.enabled) {
+      startSixtySecondsJob();
+    }
+
     client = initClient(wecomConfig.botId, wecomConfig.secret);
     client.connect();
 
@@ -1086,6 +1297,7 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
     stopProgressHeartbeat();
     stopReminderJob();
     stopGitHubTodayJob();
+    stopSixtySecondsJob();
 
     if (client) {
       client.disconnect();
