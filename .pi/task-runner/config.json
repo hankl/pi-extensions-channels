@@ -1,7 +1,7 @@
 {
   "executor": "daniel",
   "pollIntervalSeconds": 30,
-  "autoRun": true,
+  "autoRun": false,
   "resumeOnStart": true,
   "taskbusCommand": "taskbus",
   "notifyPrefix": "[task-runner]"

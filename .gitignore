@@ -9,4 +9,6 @@ dist/
 
 tasks/
 memory/
- 
+blog/
+nginx-proxy/
+.pi/extensions/wecom-bot/.tmp/

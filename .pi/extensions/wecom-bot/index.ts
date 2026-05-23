@@ -3,10 +3,68 @@ import pkg from "@wecom/aibot-node-sdk";
 import { config } from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, resolve } from "path";
+import { createWriteStream, mkdirSync, existsSync } from "fs";
+import { createDecipheriv } from "crypto";
+import { pipeline } from "stream/promises";
 import cron from "node-cron";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+const TMP_DIR = resolve(__dirname, ".tmp");
+
+async function downloadFile(url: string, destPath: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
+  const arrayBuf = await res.arrayBuffer();
+  const { createWriteStream: cws } = await import("fs");
+  const { writeFileSync } = await import("fs");
+  writeFileSync(destPath, Buffer.from(arrayBuf));
+}
+
+function decryptWeComFile(encryptedBuffer: Buffer, aesKey: string): Buffer {
+  const key = Buffer.from(aesKey, "base64");
+  const iv = key.subarray(0, 16);
+  const decipher = createDecipheriv("aes-256-cbc", key, iv);
+  decipher.setAutoPadding(false);
+  const decrypted = Buffer.concat([decipher.update(encryptedBuffer), decipher.final()]);
+  // Remove PKCS#7 padding
+  const padLen = decrypted[decrypted.length - 1];
+  if (padLen > 0 && padLen <= 32) {
+    return decrypted.subarray(0, decrypted.length - padLen);
+  }
+  return decrypted;
+}
+
+async function downloadAndDecryptImage(url: string, aesKey?: string): Promise<string | null> {
+  try {
+    if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
+    const fileName = `img_${Date.now()}.enc`;
+    const encPath = resolve(TMP_DIR, fileName);
+    const decPath = resolve(TMP_DIR, `img_${Date.now()}.jpg`);
+
+    await downloadFile(url, encPath);
+    const { readFileSync, writeFileSync } = await import("fs");
+    const encData = readFileSync(encPath);
+
+    if (aesKey) {
+      const decData = decryptWeComFile(encData, aesKey);
+      writeFileSync(decPath, decData);
+      // Cleanup encrypted file
+      const { unlinkSync } = await import("fs");
+      try { unlinkSync(encPath); } catch {}
+      return decPath;
+    } else {
+      // No aeskey, try using as-is (might not be encrypted)
+      const { renameSync } = await import("fs");
+      renameSync(encPath, decPath);
+      return decPath;
+    }
+  } catch (error) {
+    console.error("[WeCom] image download/decrypt failed:", error);
+    return null;
+  }
+}
 
 config({ path: resolve(__dirname, ".env") });
 
@@ -722,6 +780,22 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
       await handleWeComMessage(frame);
     });
 
+    wsClient.on("message.image", async (frame: WsFrame) => {
+      await handleWeComImageMessage(frame);
+    });
+
+    wsClient.on("message.file", async (frame: WsFrame) => {
+      await handleWeComFileMessage(frame);
+    });
+
+    wsClient.on("message.voice", async (frame: WsFrame) => {
+      await handleWeComVoiceMessage(frame);
+    });
+
+    wsClient.on("message.mixed", async (frame: WsFrame) => {
+      await handleWeComMixedMessage(frame);
+    });
+
     wsClient.on("event.enter_chat", async (frame: WsFrame) => {
       await handleEnterChat(frame);
     });
@@ -768,6 +842,206 @@ export default function wecomBotExtension(pi: ExtensionAPI) {
         ? `[wecom group message] user ${userId} says: ${content}`
         : `[wecom direct message] ${content}`;
 
+    pi.sendUserMessage(userMessage);
+  }
+
+  async function handleWeComImageMessage(frame: WsFrame): Promise<void> {
+    const body = frame.body;
+    const chatId = body.chatid || body.from?.userid || "";
+    const userId = body.from?.userid || "";
+    const chatType = (body.chattype || "single") as "single" | "group";
+    const imageUrl = body.image?.url || "";
+    const aesKey = body.image?.aeskey || "";
+
+    const streamId = generateReqId("stream");
+    pendingRequests.set(chatId, { frame, streamId });
+    activeSessions.set(chatId, {
+      chatId,
+      userId,
+      chatType,
+      frame,
+      streamId,
+      startedAt: Date.now(),
+      ackSent: false,
+      awaitingUserInput: false,
+      finalSent: false,
+      heartbeatCount: 0,
+    });
+    lastContact = { userId, chatId, chatType };
+    currentWeComRunChatId = chatId;
+
+    try {
+      await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
+    } catch (error) {
+      console.error("[WeCom] failed to send thinking status:", error);
+    }
+
+    // Try to download and decrypt the image
+    let localPath: string | null = null;
+    if (imageUrl) {
+      console.log(`[WeCom] downloading image, aeskey=${aesKey ? "provided" : "missing"}`);
+      localPath = await downloadAndDecryptImage(imageUrl, aesKey);
+      if (localPath) {
+        console.log(`[WeCom] image decrypted to: ${localPath}`);
+      } else {
+        console.log("[WeCom] image download/decrypt failed, passing URL only");
+      }
+    }
+
+    const imageInfo = localPath
+      ? `Image downloaded to: ${localPath} (user can read this file to analyze the image)`
+      : `Image URL: ${imageUrl}`;
+
+    const userMessage =
+      chatType === "group"
+        ? `[wecom group message] user ${userId} sent an image. ${imageInfo}`
+        : `[wecom direct message] User sent an image. ${imageInfo}`;
+
+    console.log(`[WeCom] received image from ${userId}`);
+    pi.sendUserMessage(userMessage);
+  }
+
+  async function handleWeComFileMessage(frame: WsFrame): Promise<void> {
+    const body = frame.body;
+    const chatId = body.chatid || body.from?.userid || "";
+    const userId = body.from?.userid || "";
+    const chatType = (body.chattype || "single") as "single" | "group";
+    const fileUrl = body.file?.url || "";
+
+    const streamId = generateReqId("stream");
+    pendingRequests.set(chatId, { frame, streamId });
+    activeSessions.set(chatId, {
+      chatId,
+      userId,
+      chatType,
+      frame,
+      streamId,
+      startedAt: Date.now(),
+      ackSent: false,
+      awaitingUserInput: false,
+      finalSent: false,
+      heartbeatCount: 0,
+    });
+    lastContact = { userId, chatId, chatType };
+    currentWeComRunChatId = chatId;
+
+    try {
+      await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
+    } catch (error) {
+      console.error("[WeCom] failed to send thinking status:", error);
+    }
+
+    const userMessage =
+      chatType === "group"
+        ? `[wecom group message] user ${userId} sent a file. File URL: ${fileUrl}`
+        : `[wecom direct message] User sent a file. File URL: ${fileUrl}`;
+
+    console.log(`[WeCom] received file from ${userId}, url: ${fileUrl}`);
+    pi.sendUserMessage(userMessage);
+  }
+
+  async function handleWeComVoiceMessage(frame: WsFrame): Promise<void> {
+    const body = frame.body;
+    const chatId = body.chatid || body.from?.userid || "";
+    const userId = body.from?.userid || "";
+    const chatType = (body.chattype || "single") as "single" | "group";
+    const voiceText = body.voice?.content || "";
+
+    const streamId = generateReqId("stream");
+    pendingRequests.set(chatId, { frame, streamId });
+    activeSessions.set(chatId, {
+      chatId,
+      userId,
+      chatType,
+      frame,
+      streamId,
+      startedAt: Date.now(),
+      ackSent: false,
+      awaitingUserInput: false,
+      finalSent: false,
+      heartbeatCount: 0,
+    });
+    lastContact = { userId, chatId, chatType };
+    currentWeComRunChatId = chatId;
+
+    try {
+      await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
+    } catch (error) {
+      console.error("[WeCom] failed to send thinking status:", error);
+    }
+
+    const userMessage =
+      chatType === "group"
+        ? `[wecom group message] user ${userId} sent a voice message (transcribed): ${voiceText}`
+        : `[wecom direct message] User sent a voice message (transcribed): ${voiceText}`;
+
+    console.log(`[WeCom] received voice from ${userId}: ${voiceText}`);
+    pi.sendUserMessage(userMessage);
+  }
+
+  async function handleWeComMixedMessage(frame: WsFrame): Promise<void> {
+    const body = frame.body;
+    const chatId = body.chatid || body.from?.userid || "";
+    const userId = body.from?.userid || "";
+    const chatType = (body.chattype || "single") as "single" | "group";
+
+    // Extract text and image info from mixed message
+    const items = body.mixed?.msg_item || [];
+    const textParts: string[] = [];
+    const imageUrls: string[] = [];
+    for (const item of items) {
+      if (item.msgtype === "text" && item.text?.content) {
+        textParts.push(item.text.content);
+      } else if (item.msgtype === "image" && item.image?.url) {
+        imageUrls.push(item.image.url);
+      }
+    }
+
+    const textContent = textParts.join(" ");
+
+    const streamId = generateReqId("stream");
+    pendingRequests.set(chatId, { frame, streamId });
+    activeSessions.set(chatId, {
+      chatId,
+      userId,
+      chatType,
+      frame,
+      streamId,
+      startedAt: Date.now(),
+      ackSent: false,
+      awaitingUserInput: false,
+      finalSent: false,
+      heartbeatCount: 0,
+    });
+    lastContact = { userId, chatId, chatType };
+    currentWeComRunChatId = chatId;
+
+    try {
+      await client?.replyStream(frame, streamId, getCuteThinkingStatus(), false);
+    } catch (error) {
+      console.error("[WeCom] failed to send thinking status:", error);
+    }
+
+    // For images, try to download and decrypt each one
+    const imageItems = items.filter((i: any) => i.msgtype === "image" && i.image?.url);
+    const imagePaths: string[] = [];
+    for (const imgItem of imageItems) {
+      const imgPath = await downloadAndDecryptImage(imgItem.image.url, imgItem.image.aeskey);
+      if (imgPath) imagePaths.push(imgPath);
+    }
+
+    const imageInfo = imagePaths.length > 0
+      ? `Image files: ${imagePaths.join(", ")} (user can read these files to analyze the images)`
+      : imageItems.length > 0
+        ? `Image data: ${JSON.stringify(imageItems)}`
+        : "";
+
+    const userMessage =
+      chatType === "group"
+        ? `[wecom group message] user ${userId} sent a mixed message: ${textContent}${imageInfo}`
+        : `[wecom direct message] User sent a mixed message: ${textContent}${imageInfo}`;
+
+    console.log(`[WeCom] received mixed message from ${userId}: text=${textContent}, images=${imageUrls.length}`);
     pi.sendUserMessage(userMessage);
   }
 
